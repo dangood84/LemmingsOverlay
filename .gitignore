@@ -1,0 +1,55 @@
+# Build output
+build/
+*.o
+*.ppu
+*.a
+*.or
+*.compiled
+*.exe
+*.app
+*.dmg
+*.dylib
+*.so
+*.dSYM
+link.res
+ppas.sh
+ppas.bat
+*.rsj
+*.ppm
+*.png
+
+# OS
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# Editors / IDEs
+.idea/
+*.iml
+.project
+.classpath
+.settings/
+.vscode/
+.cursor/
+*.swp
+*~
+*.bak
+*.orig
+
+# Lazarus / Delphi leftovers (this project does not use them)
+*.lps
+*.lpi.bak
+*.dcu
+*.identcache
+*.local
+__history/
+__recovery/
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+*.log
