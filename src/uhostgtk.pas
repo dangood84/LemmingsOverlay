@@ -3,8 +3,9 @@ unit uhostgtk;
 {$mode objfpc}{$H+}
 
 { Linux GTK 2 click-through overlay + panel status icon. Same
-  TLemmingsController as macOS; this unit presents a GdkPixbuf, enumerates
-  X11 client windows, and plays original WAV stings via paplay/aplay. }
+  TLemmingsController as macOS. FPC's gtk2 unit often omits status-icon
+  and a few Gdk symbols (same as Eyes), so those are cdecl externals.
+  Window bounds come from libX11, not the x / xlib Pascal units. }
 
 interface
 
@@ -15,13 +16,64 @@ implementation
 {$IF DEFINED(UNIX) AND NOT DEFINED(DARWIN)}
 
 uses
-  SysUtils, Classes, ctypes, gtk2, gdk2, gdk2pixbuf, gdk2x, glib2, x, xlib,
+  SysUtils, Unix, ctypes, gtk2, gdk2, gdk2pixbuf, gdk2x, glib2,
   ulemmingconfig, ulemmingdesktop, ulemmingapp, ulemmingaudio, ulemmingrender;
+
+type
+  PGtkStatusIcon = Pointer;
+  TXDisplay = Pointer;
+  TXWindow = culong;
+  PXWindow = ^TXWindow;
+  TXAtom = culong;
+  TXWindowAttributes = record
+    x, y: cint;
+    width, height: cint;
+    border_width: cint;
+    depth: cint;
+    visual: Pointer;
+    root: TXWindow;
+    class_: cint;
+    bit_gravity: cint;
+    win_gravity: cint;
+    backing_store: cint;
+    backing_planes: culong;
+    backing_pixel: culong;
+    save_under: cint;
+    colormap: culong;
+    map_installed: cint;
+    map_state: cint;
+    all_event_masks: clong;
+    your_event_mask: clong;
+    do_not_propagate_mask: clong;
+    override_redirect: cint;
+    screen: Pointer;
+  end;
+
+function gtk_status_icon_new: PGtkStatusIcon; cdecl; external;
+procedure gtk_status_icon_set_from_pixbuf(icon: PGtkStatusIcon; pixbuf: PGdkPixbuf); cdecl; external;
+procedure gtk_status_icon_set_visible(icon: PGtkStatusIcon; visible: gboolean); cdecl; external;
+procedure gtk_status_icon_set_tooltip_text(icon: PGtkStatusIcon; text: Pgchar); cdecl; external;
+function gtk_widget_get_window(widget: PGtkWidget): PGdkWindow; cdecl; external;
+function gdk_screen_get_rgba_colormap(screen: PGdkScreen): PGdkColormap; cdecl; external;
+procedure gdk_window_input_shape_combine_region(window: PGdkWindow;
+  shape_region: PGdkRegion; offset_x, offset_y: gint); cdecl; external;
+function gdk_x11_get_default_xdisplay: TXDisplay; cdecl; external;
+
+function XDefaultRootWindow(dpy: TXDisplay): TXWindow; cdecl; external 'libX11.so.6';
+function XInternAtom(dpy: TXDisplay; name: PChar; onlyIfExists: LongInt): TXAtom; cdecl; external 'libX11.so.6';
+function XGetWindowProperty(dpy: TXDisplay; w: TXWindow; prop: TXAtom;
+  long_offset, long_length: clong; delete: LongInt; req_type: TXAtom;
+  actual_type: Pointer; actual_format: Pointer; nitems: Pointer;
+  bytes_after: Pointer; prop_return: Pointer): cint; cdecl; external 'libX11.so.6';
+function XGetWindowAttributes(dpy: TXDisplay; w: TXWindow; attr: Pointer): cint; cdecl; external 'libX11.so.6';
+function XFree(p: Pointer): cint; cdecl; external 'libX11.so.6';
 
 const
   BarW = 24;
   BarH = 24;
   TickMs = 33;
+  XA_WINDOW = 33;
+  XIsViewable = 2;
 
 var
   Controller: TLemmingsController;
@@ -99,6 +151,8 @@ var
 begin
   if (Kind < sfxTrudge) or (Kind > sfxYippee) then
     Exit;
+  if SfxPath[Kind] = '' then
+    Exit;
   Cmd := '(paplay ' + SfxPath[Kind] + ' || aplay -q ' + SfxPath[Kind] +
     ') >/dev/null 2>&1 &';
   fpSystem(Cmd);
@@ -132,24 +186,24 @@ end;
 
 procedure CollectX11Windows(var Desk: TDeskSnapshot);
 var
-  Dpy: PDisplay;
-  Root: TWindow;
+  Dpy: TXDisplay;
+  Root: TXWindow;
   I: Integer;
   Attr: TXWindowAttributes;
-  AtomList, AtomType: TAtom;
+  AtomList, AtomType: TXAtom;
   Format: cint;
   NItems, BytesAfter: culong;
   Prop: Pointer;
-  Wins: PWindow;
-  Win: TWindow;
+  Wins: PXWindow;
+  Win: TXWindow;
 begin
   Dpy := gdk_x11_get_default_xdisplay;
   if Dpy = nil then
     Exit;
-  Root := DefaultRootWindow(Dpy);
-  AtomList := XInternAtom(Dpy, '_NET_CLIENT_LIST', False);
+  Root := XDefaultRootWindow(Dpy);
+  AtomList := XInternAtom(Dpy, '_NET_CLIENT_LIST', 0);
   Prop := nil;
-  if XGetWindowProperty(Dpy, Root, AtomList, 0, 256, False, XA_WINDOW,
+  if XGetWindowProperty(Dpy, Root, AtomList, 0, 256, 0, XA_WINDOW,
      @AtomType, @Format, @NItems, @BytesAfter, @Prop) <> 0 then
     Exit;
   if (Prop = nil) or (NItems = 0) then
@@ -158,18 +212,18 @@ begin
       XFree(Prop);
     Exit;
   end;
-  Wins := PWindow(Prop);
+  Wins := PXWindow(Prop);
   for I := 0 to Integer(NItems) - 1 do
   begin
     Win := Wins[I];
     FillChar(Attr, SizeOf(Attr), 0);
     if XGetWindowAttributes(Dpy, Win, @Attr) = 0 then
       Continue;
-    if Attr.map_state <> IsViewable then
+    if Attr.map_state <> XIsViewable then
       Continue;
     if (Attr.width < 80) or (Attr.height < 48) then
       Continue;
-    if Attr.override_redirect then
+    if Attr.override_redirect <> 0 then
       Continue;
     AddDeskRect(Desk, Integer(Win), Attr.x, Attr.y, Attr.width, Attr.height, dkWindow);
   end;
@@ -383,7 +437,8 @@ begin
   g_signal_connect(G_OBJECT(DrawArea), 'expose-event', TG_SIGNAL_FUNC(@OnExpose), nil);
 
   StatusIcon := gtk_status_icon_new;
-  gtk_status_icon_set_tooltip(StatusIcon, 'Lemmings Overlay');
+  gtk_status_icon_set_tooltip_text(StatusIcon, 'Lemmings Overlay');
+  gtk_status_icon_set_visible(StatusIcon, True);
   g_signal_connect(G_OBJECT(StatusIcon), 'popup-menu', TG_SIGNAL_FUNC(@OnStatusPopup), nil);
 
   g_timeout_add(TickMs, TGSourceFunc(@OnTick), nil);
