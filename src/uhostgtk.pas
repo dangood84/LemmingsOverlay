@@ -315,34 +315,35 @@ function BuildPopup: PGtkWidget;
 var
   Menu, Item: PGtkWidget;
 begin
+  { Linux FPC gtk2 has TGCallback (glib GCallback), not TG_SIGNAL_FUNC. }
   Menu := gtk_menu_new;
   Item := gtk_menu_item_new_with_label('Pause / Resume');
-  g_signal_connect(G_OBJECT(Item), 'activate', TG_SIGNAL_FUNC(@OnPause), nil);
+  g_signal_connect(G_OBJECT(Item), 'activate', TGCallback(@OnPause), nil);
   gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
   Item := gtk_menu_item_new_with_label('Mute Sounds');
-  g_signal_connect(G_OBJECT(Item), 'activate', TG_SIGNAL_FUNC(@OnMute), nil);
+  g_signal_connect(G_OBJECT(Item), 'activate', TGCallback(@OnMute), nil);
   gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
   Item := gtk_separator_menu_item_new;
   gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
   Item := gtk_menu_item_new_with_label('More Lemmings');
-  g_signal_connect(G_OBJECT(Item), 'activate', TG_SIGNAL_FUNC(@OnMore), nil);
+  g_signal_connect(G_OBJECT(Item), 'activate', TGCallback(@OnMore), nil);
   gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
   Item := gtk_menu_item_new_with_label('Fewer Lemmings');
-  g_signal_connect(G_OBJECT(Item), 'activate', TG_SIGNAL_FUNC(@OnFewer), nil);
+  g_signal_connect(G_OBJECT(Item), 'activate', TGCallback(@OnFewer), nil);
   gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
   Item := gtk_menu_item_new_with_label('Show Ledges');
-  g_signal_connect(G_OBJECT(Item), 'activate', TG_SIGNAL_FUNC(@OnLedges), nil);
+  g_signal_connect(G_OBJECT(Item), 'activate', TGCallback(@OnLedges), nil);
   gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
   Item := gtk_menu_item_new_with_label('Hide HUD');
-  g_signal_connect(G_OBJECT(Item), 'activate', TG_SIGNAL_FUNC(@OnHud), nil);
+  g_signal_connect(G_OBJECT(Item), 'activate', TGCallback(@OnHud), nil);
   gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
   Item := gtk_separator_menu_item_new;
   gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
   Item := gtk_menu_item_new_with_label('About Lemmings Overlay');
-  g_signal_connect(G_OBJECT(Item), 'activate', TG_SIGNAL_FUNC(@OnAbout), nil);
+  g_signal_connect(G_OBJECT(Item), 'activate', TGCallback(@OnAbout), nil);
   gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
   Item := gtk_menu_item_new_with_label('Quit');
-  g_signal_connect(G_OBJECT(Item), 'activate', TG_SIGNAL_FUNC(@OnQuit), nil);
+  g_signal_connect(G_OBJECT(Item), 'activate', TGCallback(@OnQuit), nil);
   gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
   gtk_widget_show_all(Menu);
   Result := Menu;
@@ -429,17 +430,17 @@ begin
     gtk_widget_set_colormap(Overlay, Colormap);
   gtk_window_move(PGtkWindow(Overlay), 0, 0);
   gtk_window_resize(PGtkWindow(Overlay), W, H);
-  g_signal_connect(G_OBJECT(Overlay), 'delete-event', TG_SIGNAL_FUNC(@OnQuit), nil);
-  g_signal_connect(G_OBJECT(Overlay), 'map-event', TG_SIGNAL_FUNC(@OnMap), nil);
+  g_signal_connect(G_OBJECT(Overlay), 'delete-event', TGCallback(@OnQuit), nil);
+  g_signal_connect(G_OBJECT(Overlay), 'map-event', TGCallback(@OnMap), nil);
 
   DrawArea := gtk_drawing_area_new;
   gtk_container_add(PGtkContainer(Overlay), DrawArea);
-  g_signal_connect(G_OBJECT(DrawArea), 'expose-event', TG_SIGNAL_FUNC(@OnExpose), nil);
+  g_signal_connect(G_OBJECT(DrawArea), 'expose-event', TGCallback(@OnExpose), nil);
 
   StatusIcon := gtk_status_icon_new;
   gtk_status_icon_set_tooltip_text(StatusIcon, 'Lemmings Overlay');
   gtk_status_icon_set_visible(StatusIcon, True);
-  g_signal_connect(G_OBJECT(StatusIcon), 'popup-menu', TG_SIGNAL_FUNC(@OnStatusPopup), nil);
+  g_signal_connect(G_OBJECT(StatusIcon), 'popup-menu', TGCallback(@OnStatusPopup), nil);
 
   g_timeout_add(TickMs, TGSourceFunc(@OnTick), nil);
   CollectDesktop;
