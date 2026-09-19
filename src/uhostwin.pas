@@ -18,6 +18,27 @@ uses
   Windows, Messages, ShellAPI, SysUtils, MMSystem, ulemmingconfig,
   ulemmingdesktop, ulemmingapp, ulemmingaudio, ulemmingrender;
 
+{ FPC 3.2.2's Win32 Windows unit does not publish MonitorFromWindow /
+  UpdateLayeredWindow / TMonitorInfo. Eyes avoids those APIs; we declare
+  only the layered-window call and size the overlay with GetSystemMetrics. }
+
+type
+  TOverlaySize = packed record
+    cx, cy: LongInt;
+  end;
+  TBlendFn = packed record
+    BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat: Byte;
+  end;
+  TTrayIconData = packed record
+    cbSize: DWORD;
+    Wnd: HWND;
+    uID: UINT;
+    uFlags: UINT;
+    uCallbackMessage: UINT;
+    hIcon: HICON;
+    szTip: array[0..63] of AnsiChar;
+  end;
+
 const
   AppName = 'LemmingsOverlayWnd';
   WmTray = WM_APP + 42;
@@ -34,11 +55,21 @@ const
   BarH = 32;
   TickId = 1;
   TickMs = 33;
+  UlwAlpha = 2;
+  AcSrcOver = 0;
+  AcSrcAlpha = 1;
+
+function UpdateLayeredWindow(Wnd: HWND; hdcDst: HDC; pptDst: PPoint;
+  psize: Pointer; hdcSrc: HDC; pptSrc: PPoint; crKey: COLORREF;
+  pblend: Pointer; dwFlags: DWORD): BOOL; stdcall; external 'user32.dll' name 'UpdateLayeredWindow';
+
+function ShellNotifyIcon(dwMessage: DWORD; lpData: Pointer): BOOL; stdcall;
+  external 'shell32.dll' name 'Shell_NotifyIconA';
 
 var
   Controller: TLemmingsController;
   OverlayWnd: HWND;
-  TrayIcon: NOTIFYICONDATA;
+  TrayIcon: TTrayIconData;
   Bgra: array of Byte;
   SfxWav: array[sfxTrudge..sfxYippee] of TBytes;
   LastTrudge: QWord;
@@ -82,25 +113,23 @@ end;
 procedure CollectDesktop;
 var
   Desk: TDeskSnapshot;
-  Mi: TMonitorInfo;
-  Mon: HMONITOR;
-  TaskH: Integer;
+  Work: TRect;
+  ScreenW, ScreenH, TaskH: Integer;
   WinCount: Integer;
 begin
   if Controller = nil then
     Exit;
   ClearDesktop(Desk, Controller.Overlay.Width, Controller.Overlay.Height);
-  FillChar(Mi, SizeOf(Mi), 0);
-  Mi.cbSize := SizeOf(Mi);
-  Mon := MonitorFromWindow(OverlayWnd, MONITOR_DEFAULTTOPRIMARY);
-  if GetMonitorInfo(Mon, @Mi) then
+  ScreenW := GetSystemMetrics(SM_CXSCREEN);
+  ScreenH := GetSystemMetrics(SM_CYSCREEN);
+  FillChar(Work, SizeOf(Work), 0);
+  if SystemParametersInfo(SPI_GETWORKAREA, 0, @Work, 0) then
   begin
-    TaskH := Mi.rcMonitor.Bottom - Mi.rcWork.Bottom;
+    TaskH := ScreenH - Work.Bottom;
     if TaskH > 8 then
       AddDeskRect(Desk, 8002, 0, Desk.ScreenH - TaskH, Desk.ScreenW, TaskH, dkDock);
-    if Mi.rcWork.Top - Mi.rcMonitor.Top > 2 then
-      AddDeskRect(Desk, 8001, 0, (Mi.rcWork.Top - Mi.rcMonitor.Top),
-        Desk.ScreenW, 6, dkScreenTop);
+    if Work.Top > 2 then
+      AddDeskRect(Desk, 8001, 0, Work.Top, Desk.ScreenW, 6, dkScreenTop);
   end;
   WinCount := Desk.Count;
   EnumWindows(@EnumAddWindow, LPARAM(@Desk));
@@ -152,8 +181,8 @@ var
   Info: BITMAPINFO;
   Bits: Pointer;
   Dib, Old: HBITMAP;
-  Blend: BLENDFUNCTION;
-  Size: SIZE;
+  Blend: TBlendFn;
+  LayerSize: TOverlaySize;
   SrcPt, DstPt: TPoint;
   R: TRect;
 begin
@@ -179,17 +208,17 @@ begin
     Move(Bgra[0], Bits^, Length(Bgra));
 
   GetWindowRect(Wnd, R);
-  Size.cx := Controller.Overlay.Width;
-  Size.cy := Controller.Overlay.Height;
+  LayerSize.cx := Controller.Overlay.Width;
+  LayerSize.cy := Controller.Overlay.Height;
   SrcPt.X := 0;
   SrcPt.Y := 0;
   DstPt.X := R.Left;
   DstPt.Y := R.Top;
   FillChar(Blend, SizeOf(Blend), 0);
-  Blend.BlendOp := AC_SRC_OVER;
+  Blend.BlendOp := AcSrcOver;
   Blend.SourceConstantAlpha := 255;
-  Blend.AlphaFormat := AC_SRC_ALPHA;
-  UpdateLayeredWindow(Wnd, ScreenDC, @DstPt, @Size, MemDC, @SrcPt, 0, @Blend, ULW_ALPHA);
+  Blend.AlphaFormat := AcSrcAlpha;
+  UpdateLayeredWindow(Wnd, ScreenDC, @DstPt, @LayerSize, MemDC, @SrcPt, 0, @Blend, UlwAlpha);
 
   SelectObject(MemDC, Old);
   if Dib <> 0 then
@@ -239,7 +268,7 @@ begin
     DestroyIcon(TrayIcon.hIcon);
   TrayIcon.hIcon := Icon;
   TrayIcon.uFlags := NIF_ICON or NIF_MESSAGE or NIF_TIP;
-  Shell_NotifyIcon(NIM_MODIFY, @TrayIcon);
+  ShellNotifyIcon(NIM_MODIFY, @TrayIcon);
   if Dib <> 0 then
     DeleteObject(Dib);
   if Mask <> 0 then
@@ -249,20 +278,16 @@ end;
 
 procedure CoverPrimary(Wnd: HWND);
 var
-  Mi: TMonitorInfo;
-  Mon: HMONITOR;
+  ScreenW, ScreenH: Integer;
 begin
-  FillChar(Mi, SizeOf(Mi), 0);
-  Mi.cbSize := SizeOf(Mi);
-  Mon := MonitorFromWindow(Wnd, MONITOR_DEFAULTTOPRIMARY);
-  GetMonitorInfo(Mon, @Mi);
-  SetWindowPos(Wnd, HWND_TOPMOST,
-    Mi.rcMonitor.Left, Mi.rcMonitor.Top,
-    Mi.rcMonitor.Right - Mi.rcMonitor.Left,
-    Mi.rcMonitor.Bottom - Mi.rcMonitor.Top,
-    SWP_SHOWWINDOW);
-  Controller.Resize(Mi.rcMonitor.Right - Mi.rcMonitor.Left,
-    Mi.rcMonitor.Bottom - Mi.rcMonitor.Top);
+  ScreenW := GetSystemMetrics(SM_CXSCREEN);
+  ScreenH := GetSystemMetrics(SM_CYSCREEN);
+  if ScreenW < 1 then
+    ScreenW := 800;
+  if ScreenH < 1 then
+    ScreenH := 500;
+  SetWindowPos(Wnd, HWND_TOPMOST, 0, 0, ScreenW, ScreenH, SWP_SHOWWINDOW);
+  Controller.Resize(ScreenW, ScreenH);
 end;
 
 procedure ShowAbout(Wnd: HWND);
@@ -276,16 +301,16 @@ var
   Pt: TPoint;
 begin
   Menu := CreatePopupMenu;
-  AppendMenu(Menu, MF_STRING, CmdPause, '&Pause / Resume');
-  AppendMenu(Menu, MF_STRING, CmdMute, '&Mute Sounds');
+  AppendMenu(Menu, MF_STRING, CmdPause, PChar('&Pause / Resume'));
+  AppendMenu(Menu, MF_STRING, CmdMute, PChar('&Mute Sounds'));
   AppendMenu(Menu, MF_SEPARATOR, 0, nil);
-  AppendMenu(Menu, MF_STRING, CmdMore, '&More Lemmings');
-  AppendMenu(Menu, MF_STRING, CmdFewer, '&Fewer Lemmings');
-  AppendMenu(Menu, MF_STRING, CmdLedges, 'Show &Ledges');
-  AppendMenu(Menu, MF_STRING, CmdHud, 'Hide &HUD');
+  AppendMenu(Menu, MF_STRING, CmdMore, PChar('&More Lemmings'));
+  AppendMenu(Menu, MF_STRING, CmdFewer, PChar('&Fewer Lemmings'));
+  AppendMenu(Menu, MF_STRING, CmdLedges, PChar('Show &Ledges'));
+  AppendMenu(Menu, MF_STRING, CmdHud, PChar('Hide &HUD'));
   AppendMenu(Menu, MF_SEPARATOR, 0, nil);
-  AppendMenu(Menu, MF_STRING, CmdAbout, '&About...');
-  AppendMenu(Menu, MF_STRING, CmdQuit, 'E&xit');
+  AppendMenu(Menu, MF_STRING, CmdAbout, PChar('&About...'));
+  AppendMenu(Menu, MF_STRING, CmdQuit, PChar('E&xit'));
   GetCursorPos(Pt);
   SetForegroundWindow(Wnd);
   TrackPopupMenu(Menu, TPM_RIGHTBUTTON, Pt.X, Pt.Y, 0, Wnd, nil);
@@ -298,6 +323,7 @@ begin
   case Msg of
     WM_CREATE:
       begin
+        OverlayWnd := Wnd;
         SetTimer(Wnd, TickId, TickMs, nil);
         CoverPrimary(Wnd);
         CollectDesktop;
@@ -330,7 +356,7 @@ begin
     WM_DESTROY:
       begin
         KillTimer(Wnd, TickId);
-        Shell_NotifyIcon(NIM_DELETE, @TrayIcon);
+        ShellNotifyIcon(NIM_DELETE, @TrayIcon);
         PlaySound(nil, 0, 0);
         PostQuitMessage(0);
       end;
@@ -373,8 +399,9 @@ begin
   TrayIcon.uID := IdTray;
   TrayIcon.uFlags := NIF_MESSAGE or NIF_TIP;
   TrayIcon.uCallbackMessage := WmTray;
-  StrPCopy(TrayIcon.szTip, 'Lemmings Overlay');
-  Shell_NotifyIcon(NIM_ADD, @TrayIcon);
+  FillChar(TrayIcon.szTip, SizeOf(TrayIcon.szTip), 0);
+  StrPLCopy(@TrayIcon.szTip[0], 'Lemmings Overlay', High(TrayIcon.szTip));
+  ShellNotifyIcon(NIM_ADD, @TrayIcon);
   UpdateTrayIcon;
 
   ShowWindow(OverlayWnd, SW_SHOW);
