@@ -72,11 +72,16 @@ function XGetSelectionOwner(dpy: TXDisplay; selection: TXAtom): TXWindow; cdecl;
 function XTranslateCoordinates(dpy: TXDisplay; src, dest: TXWindow;
   src_x, src_y: cint; dest_x, dest_y: Pcint; child_return: Pointer): LongInt;
   cdecl; external 'libX11.so.6';
+function XQueryTree(dpy: TXDisplay; w: TXWindow; root_return: Pointer;
+  parent_return: Pointer; children_return: Pointer;
+  nchildren_return: Pointer): cint; cdecl; external 'libX11.so.6';
 function gdk_x11_drawable_get_xid(drawable: PGdkDrawable): TXWindow; cdecl; external;
 
 const
   BarW = 24;
   BarH = 24;
+  { Clock + volume + wifi + bluetooth + updater on the right of lxpanel-pi. }
+  ChipTrayReserve = 200;
   TickMs = 33;
   XA_WINDOW = 33;
   XA_CARDINAL = 6;
@@ -98,6 +103,7 @@ var
   LastTrudge: QWord;
   Popup: PGtkWidget;
   OverlayXid: TXWindow;
+  ChipXid: TXWindow;
   ScreenWpx, ScreenHpx: Integer;
   NeedShapeMask: Boolean;
   PanelTopPx: Integer;
@@ -653,18 +659,83 @@ begin
   end;
 end;
 
+function ChipSlotX: Integer;
+var
+  Dpy: TXDisplay;
+  Root: TXWindow;
+  BestLeft: Integer;
+
+  procedure Consider(Win: TXWindow; Depth: Integer);
+  var
+    Attr: TXWindowAttributes;
+    RootX, RootY: cint;
+    Child: TXWindow;
+    Kids: PXWindow;
+    RootRet, ParentRet: TXWindow;
+    N: cuint;
+    I: Integer;
+    InPanel, WalkKids: Boolean;
+  begin
+    if (Win = 0) or (Depth > 6) then
+      Exit;
+    if (ChipXid <> 0) and (Win = ChipXid) then
+      Exit;
+    if (OverlayXid <> 0) and (Win = OverlayXid) then
+      Exit;
+    FillChar(Attr, SizeOf(Attr), 0);
+    if XGetWindowAttributes(Dpy, Win, @Attr) = 0 then
+      Exit;
+    if Attr.map_state <> XIsViewable then
+      Exit;
+    RootX := Attr.x;
+    RootY := Attr.y;
+    Child := 0;
+    XTranslateCoordinates(Dpy, Win, Root, 0, 0, @RootX, @RootY, @Child);
+    InPanel := (RootY < PanelTopPx + 4) and (RootY + Attr.height > 0);
+    if InPanel and (Attr.width >= 8) and (Attr.width <= 140) and
+       (Attr.height >= 8) and (Attr.height <= PanelTopPx + 12) and
+       (RootX > (ScreenWpx div 2)) and (RootX < BestLeft) then
+      BestLeft := RootX;
+    WalkKids := (Depth = 0) or (InPanel and (Attr.width > 40));
+    if not WalkKids then
+      Exit;
+    Kids := nil;
+    N := 0;
+    RootRet := 0;
+    ParentRet := 0;
+    if XQueryTree(Dpy, Win, @RootRet, @ParentRet, @Kids, @N) = 0 then
+      Exit;
+    if (Kids <> nil) and (N > 0) and (N < 256) then
+      for I := 0 to Integer(N) - 1 do
+        Consider(PXWindow(Kids)[I], Depth + 1);
+    if Kids <> nil then
+      XFree(Kids);
+  end;
+
+begin
+  { Left of the leftmost right-aligned panel icon (Bluetooth). Far right of
+    the clock has no gap — that is where the badge was hiding. }
+  Result := ScreenWpx - BarW - ChipTrayReserve;
+  Dpy := gdk_x11_get_default_xdisplay;
+  if Dpy = nil then
+    Exit;
+  Root := XDefaultRootWindow(Dpy);
+  BestLeft := ScreenWpx;
+  Consider(Root, 0);
+  if BestLeft < ScreenWpx - 8 then
+    Result := BestLeft - BarW - 4;
+  if Result < 0 then
+    Result := 0;
+end;
+
 procedure PlaceChip;
 var
   X, Y: Integer;
   GdkWin: PGdkWindow;
 begin
-  { Sit in the panel strip on the right. A 24x24 window here is the menu
-    extra; GtkStatusIcon never embeds in lxpanel-pi. }
   if Chip = nil then
     Exit;
-  X := ScreenWpx - BarW - 4;
-  if X < 0 then
-    X := 0;
+  X := ChipSlotX;
   Y := (PanelTopPx - BarH) div 2;
   if Y < 0 then
     Y := 0;
@@ -817,6 +888,7 @@ begin
   GdkWin := gtk_widget_get_window(Widget);
   if GdkWin = nil then
     Exit;
+  ChipXid := gdk_x11_drawable_get_xid(GdkWin);
   { Only the 24x24 badge is override-redirect, so it can sit on the panel.
     The fullscreen overlay must not. }
   gdk_window_set_override_redirect(GdkWin, True);
@@ -932,6 +1004,7 @@ begin
   OverlayPmH := 0;
   Popup := nil;
   OverlayXid := 0;
+  ChipXid := 0;
   Screen := gdk_screen_get_default;
   W := gdk_screen_get_width(Screen);
   H := gdk_screen_get_height(Screen);
