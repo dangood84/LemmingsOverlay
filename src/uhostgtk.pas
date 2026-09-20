@@ -91,6 +91,8 @@ var
   Overlay: PGtkWidget;
   DrawArea: PGtkWidget;
   StatusIcon: PGtkStatusIcon;
+  TrayWin: PGtkWidget;
+  TrayBadge: PGdkPixbuf;
   OverlayPix: PGdkPixbuf;
   BarPix: PGdkPixbuf;
   OverlayPm: PGdkPixmap;
@@ -283,7 +285,66 @@ begin
   Controller.SetDesktop(Desk);
 end;
 
-function ReadWorkareaTop: Integer;
+function WindowCardinalAt(Dpy: TXDisplay; Win: TXWindow; Name: PChar;
+  Index: Integer): Integer;
+var
+  Atom, AtomType: TXAtom;
+  Format: cint;
+  NItems, BytesAfter: culong;
+  Prop: Pointer;
+  Vals: pculong;
+begin
+  Result := -1;
+  Atom := XInternAtom(Dpy, Name, 1);
+  if Atom = 0 then
+    Exit;
+  Prop := nil;
+  if XGetWindowProperty(Dpy, Win, Atom, 0, 16, 0, XA_CARDINAL,
+     @AtomType, @Format, @NItems, @BytesAfter, @Prop) <> 0 then
+    Exit;
+  if (Prop <> nil) and (Integer(NItems) > Index) then
+  begin
+    Vals := pculong(Prop);
+    Result := Integer(Vals[Index]);
+  end;
+  if Prop <> nil then
+    XFree(Prop);
+end;
+
+function WindowIsDock(Dpy: TXDisplay; Win: TXWindow): Boolean;
+var
+  AtomType, AtomDock, GotType: TXAtom;
+  Format: cint;
+  NItems, BytesAfter: culong;
+  Prop: Pointer;
+  Atoms: ^TXAtom;
+  I: Integer;
+begin
+  Result := False;
+  AtomType := XInternAtom(Dpy, '_NET_WM_WINDOW_TYPE', 1);
+  AtomDock := XInternAtom(Dpy, '_NET_WM_WINDOW_TYPE_DOCK', 1);
+  if (AtomType = 0) or (AtomDock = 0) then
+    Exit;
+  Prop := nil;
+  { 4 = XA_ATOM }
+  if XGetWindowProperty(Dpy, Win, AtomType, 0, 8, 0, 4,
+     @GotType, @Format, @NItems, @BytesAfter, @Prop) <> 0 then
+    Exit;
+  if (Prop <> nil) and (NItems > 0) then
+  begin
+    Atoms := Prop;
+    for I := 0 to Integer(NItems) - 1 do
+      if Atoms[I] = AtomDock then
+      begin
+        Result := True;
+        Break;
+      end;
+  end;
+  if Prop <> nil then
+    XFree(Prop);
+end;
+
+function ReadPanelTop: Integer;
 var
   Dpy: TXDisplay;
   Root: TXWindow;
@@ -291,36 +352,60 @@ var
   Format: cint;
   NItems, BytesAfter: culong;
   Prop: Pointer;
-  Vals: pculong;
+  Wins: PXWindow;
+  Win, Child: TXWindow;
+  I, V, RootX, RootY: Integer;
+  Attr: TXWindowAttributes;
 begin
-  { _NET_WORKAREA y is the panel height. Keep that strip out of the overlay
-    so the GtkStatusIcon on the Pi panel stays clickable. }
+  { Use the real panel height. 36px left a white strip over the Pi tray
+    (the blank slot sitting above the language icon). }
   Result := 0;
   Dpy := gdk_x11_get_default_xdisplay;
   if Dpy = nil then
     Exit;
   Root := XDefaultRootWindow(Dpy);
-  AtomList := XInternAtom(Dpy, '_NET_WORKAREA', 1);
-  if AtomList = 0 then
-    Exit;
+  V := WindowCardinalAt(Dpy, Root, '_NET_WORKAREA', 1);
+  if V > Result then
+    Result := V;
   Prop := nil;
-  if XGetWindowProperty(Dpy, Root, AtomList, 0, 4, 0, XA_CARDINAL,
-     @AtomType, @Format, @NItems, @BytesAfter, @Prop) <> 0 then
-    Exit;
-  if (Prop <> nil) and (NItems >= 4) then
+  AtomList := XInternAtom(Dpy, '_NET_CLIENT_LIST', 0);
+  if (AtomList <> 0) and (XGetWindowProperty(Dpy, Root, AtomList, 0, 256, 0,
+     XA_WINDOW, @AtomType, @Format, @NItems, @BytesAfter, @Prop) = 0) and
+     (Prop <> nil) then
   begin
-    Vals := pculong(Prop);
-    Result := Integer(Vals[1]);
-    if Result < 0 then
-      Result := 0;
-    if Result > 96 then
-      Result := 36;
+    Wins := PXWindow(Prop);
+    for I := 0 to Integer(NItems) - 1 do
+    begin
+      Win := Wins[I];
+      V := WindowCardinalAt(Dpy, Win, '_NET_WM_STRUT_PARTIAL', 2);
+      if V < 0 then
+        V := WindowCardinalAt(Dpy, Win, '_NET_WM_STRUT', 2);
+      if V > Result then
+        Result := V;
+      FillChar(Attr, SizeOf(Attr), 0);
+      if XGetWindowAttributes(Dpy, Win, @Attr) = 0 then
+        Continue;
+      if Attr.map_state <> XIsViewable then
+        Continue;
+      RootX := Attr.x;
+      RootY := Attr.y;
+      Child := 0;
+      XTranslateCoordinates(Dpy, Win, Root, 0, 0, @RootX, @RootY, @Child);
+      if (RootY <= 4) and (Attr.width >= ScreenWpx - 16) and
+         (Attr.height > 8) and (Attr.height <= 96) then
+        if Attr.height > Result then
+          Result := Attr.height;
+      if WindowIsDock(Dpy, Win) and (RootY <= 8) and (Attr.height > Result) and
+         (Attr.height <= 96) then
+        Result := Attr.height;
+    end;
   end;
   if Prop <> nil then
     XFree(Prop);
-  { lxpanel often omits _NET_WORKAREA; keep a typical strip free anyway. }
-  if Result = 0 then
-    Result := 36;
+  if Result < 48 then
+    Result := 48;
+  if Result > 96 then
+    Result := 52;
 end;
 
 procedure HardenPixbufAlpha(Pix: PGdkPixbuf; Threshold: Integer);
@@ -355,22 +440,6 @@ begin
   end;
 end;
 
-procedure MaskOutPanel(Mask: PGdkPixmap; W, Top: Integer);
-var
-  Gc: PGdkGC;
-  Col: TGdkColor;
-begin
-  if (Mask = nil) or (Top <= 0) or (W < 1) then
-    Exit;
-  FillChar(Col, SizeOf(Col), 0);
-  Gc := gdk_gc_new(Mask);
-  if Gc = nil then
-    Exit;
-  gdk_gc_set_foreground(Gc, @Col);
-  gdk_draw_rectangle(Mask, Gc, 1, 0, 0, W, Top);
-  g_object_unref(Gc);
-end;
-
 procedure HideAllPixels(GdkWin: PGdkWindow);
 var
   Region: PGdkRegion;
@@ -382,6 +451,21 @@ begin
   Region := gdk_region_new;
   gdk_window_shape_combine_region(GdkWin, Region, 0, 0);
   gdk_region_destroy(Region);
+end;
+
+function OverlaySrcY: Integer;
+begin
+  { The overlay window sits below the panel, so we skip those pixbuf rows. }
+  Result := PanelTopPx;
+  if Result < 0 then
+    Result := 0;
+end;
+
+function OverlayViewH(PixH: Integer): Integer;
+begin
+  Result := PixH - OverlaySrcY;
+  if Result < 1 then
+    Result := PixH;
 end;
 
 function CompositorIsRunning: Boolean;
@@ -403,7 +487,7 @@ end;
 procedure ShapeToPixbuf(GdkWin: PGdkWindow; Pix: PGdkPixbuf);
 var
   Mask: PGdkPixmap;
-  DestW, DestH: Integer;
+  DestW, DestH, SrcY: Integer;
 begin
   if GdkWin = nil then
     Exit;
@@ -412,14 +496,13 @@ begin
     HideAllPixels(GdkWin);
     Exit;
   end;
+  SrcY := OverlaySrcY;
   DestW := gdk_pixbuf_get_width(Pix);
-  DestH := gdk_pixbuf_get_height(Pix);
+  DestH := OverlayViewH(gdk_pixbuf_get_height(Pix));
   Mask := gdk_pixmap_new(GdkWin, DestW, DestH, 1);
   if Mask = nil then
     Exit;
-  gdk_pixbuf_render_threshold_alpha(Pix, Mask, 0, 0, 0, 0, DestW, DestH, ShapeAlpha);
-  if NeedShapeMask then
-    MaskOutPanel(Mask, DestW, PanelTopPx);
+  gdk_pixbuf_render_threshold_alpha(Pix, Mask, 0, SrcY, 0, 0, DestW, DestH, ShapeAlpha);
   gdk_window_shape_combine_mask(GdkWin, Mask, 0, 0);
   g_object_unref(Mask);
 end;
@@ -471,15 +554,21 @@ end;
 procedure FillColorPixmap;
 var
   Gc: PGdkGC;
+  Src: Pguchar;
+  Stride, SrcY: Integer;
 begin
   if (OverlayPm = nil) or (OverlayPix = nil) then
     Exit;
   Gc := gdk_gc_new(OverlayPm);
   if Gc = nil then
     Exit;
+  Stride := gdk_pixbuf_get_rowstride(OverlayPix);
+  SrcY := OverlaySrcY;
+  Src := gdk_pixbuf_get_pixels(OverlayPix);
+  if SrcY > 0 then
+    Inc(Src, SrcY * Stride);
   gdk_draw_rgb_32_image(OverlayPm, Gc, 0, 0, OverlayPmW, OverlayPmH,
-    GDK_RGB_DITHER_NONE, gdk_pixbuf_get_pixels(OverlayPix),
-    gdk_pixbuf_get_rowstride(OverlayPix));
+    GDK_RGB_DITHER_NONE, Src, Stride);
   g_object_unref(Gc);
 end;
 
@@ -513,7 +602,7 @@ begin
   if TopWin = nil then
     Exit;
   W := gdk_pixbuf_get_width(OverlayPix);
-  H := gdk_pixbuf_get_height(OverlayPix);
+  H := OverlayViewH(gdk_pixbuf_get_height(OverlayPix));
   EnsureColorPixmap(TopWin, W, H);
   FillColorPixmap;
   ApplyShapedPixmap(TopWin);
@@ -524,20 +613,21 @@ end;
 procedure PushStatusIcon;
 var
   Badge: PGdkPixbuf;
-  SW, SH, SS, DS, X, Y: Integer;
+  SW, SH, SS, DS, SD, X, Y: Integer;
   S, D: PByte;
 begin
-  { Opaque badge so lxpanel always has something to click. A transparent
-    24×24 walker disappears on a dark Raspberry Pi tray. }
+  { RGB (no alpha) badge. lxpanel leaves a blank slot for an RGBA tray
+    image, and a keep-above overlay over the panel ate the clicks. }
   if (StatusIcon = nil) or (BarPix = nil) then
     Exit;
   SW := gdk_pixbuf_get_width(BarPix);
   SH := gdk_pixbuf_get_height(BarPix);
-  Badge := gdk_pixbuf_new(GDK_COLORSPACE_RGB, True, 8, SW, SH);
+  Badge := gdk_pixbuf_new(GDK_COLORSPACE_RGB, False, 8, SW, SH);
   if Badge = nil then
     Exit;
   SS := gdk_pixbuf_get_rowstride(BarPix);
   DS := gdk_pixbuf_get_rowstride(Badge);
+  SD := gdk_pixbuf_get_n_channels(Badge);
   for Y := 0 to SH - 1 do
   begin
     S := PByte(gdk_pixbuf_get_pixels(BarPix)) + Y * SS;
@@ -549,22 +639,25 @@ begin
         D[0] := S[0];
         D[1] := S[1];
         D[2] := S[2];
-        D[3] := 255;
       end
       else
       begin
-        D[0] := 24;
-        D[1] := 32;
-        D[2] := 56;
-        D[3] := 255;
+        D[0] := 48;
+        D[1] := 110;
+        D[2] := 190;
       end;
       Inc(S, 4);
-      Inc(D, 4);
+      Inc(D, SD);
     end;
   end;
   gtk_status_icon_set_from_pixbuf(StatusIcon, Badge);
-  gtk_status_icon_set_visible(StatusIcon, True);
-  g_object_unref(Badge);
+  { The XEmbed plug was clipping to a few pixels above the language icon,
+    off the top of the screen. Keep it hidden; TrayWin is the menu extra. }
+  gtk_status_icon_set_visible(StatusIcon, False);
+  DestroyPix(TrayBadge);
+  TrayBadge := Badge;
+  if TrayWin <> nil then
+    gtk_widget_queue_draw(TrayWin);
 end;
 
 procedure SilenceBackground(Win: PGtkWidget);
@@ -698,6 +791,82 @@ begin
   OnStatusPopup(Icon, 0, gtk_get_current_event_time(), Data);
 end;
 
+procedure PlaceOverlay;
+var
+  GdkWin: PGdkWindow;
+  H: Integer;
+begin
+  if Overlay = nil then
+    Exit;
+  H := ScreenHpx - PanelTopPx;
+  if H < 1 then
+    H := ScreenHpx;
+  gtk_window_move(PGtkWindow(Overlay), 0, PanelTopPx);
+  gtk_window_resize(PGtkWindow(Overlay), ScreenWpx, H);
+  GdkWin := gtk_widget_get_window(Overlay);
+  if GdkWin = nil then
+    Exit;
+  { libgtk omitted gtk_window_set_override_redirect; GDK still has this. }
+  gdk_window_set_override_redirect(GdkWin, 1);
+  gdk_window_move(GdkWin, 0, PanelTopPx);
+  gdk_window_resize(GdkWin, ScreenWpx, H);
+end;
+
+procedure PlaceTray;
+var
+  X, Y: Integer;
+  GdkWin: PGdkWindow;
+begin
+  if TrayWin = nil then
+    Exit;
+  X := ScreenWpx - BarW - 8;
+  if X < 0 then
+    X := 0;
+  Y := (PanelTopPx - BarH) div 2;
+  if Y < 2 then
+    Y := 2;
+  if Y + BarH > PanelTopPx then
+  begin
+    Y := PanelTopPx - BarH - 2;
+    if Y < 2 then
+      Y := 2;
+  end;
+  gtk_window_move(PGtkWindow(TrayWin), X, Y);
+  gtk_window_resize(PGtkWindow(TrayWin), BarW, BarH);
+  GdkWin := gtk_widget_get_window(TrayWin);
+  if GdkWin <> nil then
+  begin
+    gdk_window_set_override_redirect(GdkWin, 1);
+    gdk_window_move(GdkWin, X, Y);
+    gdk_window_resize(GdkWin, BarW, BarH);
+    gdk_window_raise(GdkWin);
+  end;
+end;
+
+function OnTrayExpose(Widget: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
+var
+  Gc: PGdkGC;
+  W, H: Integer;
+begin
+  Result := True;
+  if (Widget^.window = nil) or (TrayBadge = nil) then
+    Exit;
+  W := gdk_pixbuf_get_width(TrayBadge);
+  H := gdk_pixbuf_get_height(TrayBadge);
+  Gc := gdk_gc_new(Widget^.window);
+  if Gc = nil then
+    Exit;
+  gdk_draw_rgb_image(Widget^.window, Gc, 0, 0, W, H, GDK_RGB_DITHER_NONE,
+    gdk_pixbuf_get_pixels(TrayBadge), gdk_pixbuf_get_rowstride(TrayBadge));
+  g_object_unref(Gc);
+end;
+
+function OnTrayClick(Widget: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
+begin
+  OnStatusPopup(StatusIcon, Event^.button.button, Event^.button.time, Data);
+  Result := True;
+end;
+
 function OnTick(Data: gpointer): gboolean; cdecl;
 begin
   CollectDesktop;
@@ -732,11 +901,20 @@ begin
   gdk_region_destroy(Region);
 end;
 
+procedure MakeOverlayClickThrough;
+begin
+  { The drawing-area child has its own X window. Shaping only the toplevel
+    still lets the child eat clicks on the panel icon. }
+  MakeClickThrough(Overlay);
+  MakeClickThrough(DrawArea);
+end;
+
 procedure OnRealize(Widget: PGtkWidget; Data: gpointer); cdecl;
 begin
   { None background + a 1-bit shape leaves unpainted pixels as stale VRAM. }
   if not NeedShapeMask then
     SilenceBackground(Widget);
+  MakeOverlayClickThrough;
   { Do not punch an empty hole if the first frame is already in OverlayPix —
     show_all can realize the drawing area after Present. }
   if OverlayPix = nil then
@@ -752,7 +930,7 @@ function OnMap(Widget: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; 
 var
   GdkWin: PGdkWindow;
 begin
-  MakeClickThrough(Widget);
+  MakeOverlayClickThrough;
   if not NeedShapeMask then
   begin
     SilenceBackground(Overlay);
@@ -776,29 +954,45 @@ begin
   LastTrudge := 0;
   OverlayPix := nil;
   BarPix := nil;
+  TrayBadge := nil;
+  TrayWin := nil;
   OverlayPm := nil;
   OverlayPmW := 0;
   OverlayPmH := 0;
   Popup := nil;
   OverlayXid := 0;
-  NeedShapeMask := not CompositorIsRunning;
-  PanelTopPx := ReadWorkareaTop;
-  WriteSfxFiles;
-
   Screen := gdk_screen_get_default;
   W := gdk_screen_get_width(Screen);
   H := gdk_screen_get_height(Screen);
   ScreenWpx := W;
   ScreenHpx := H;
+  NeedShapeMask := not CompositorIsRunning;
+  PanelTopPx := ReadPanelTop;
+  WriteSfxFiles;
+
   Controller := TLemmingsController.Create(W, H, BarW, BarH, LoadConfig);
 
   { Embed the tray icon before the fullscreen overlay exists. Some panels
     drop GtkStatusIcon once a keep-above screen-sized window is mapped. }
   StatusIcon := gtk_status_icon_new;
   gtk_status_icon_set_tooltip_text(StatusIcon, 'Lemmings Overlay');
-  gtk_status_icon_set_visible(StatusIcon, True);
+  gtk_status_icon_set_visible(StatusIcon, False);
   g_signal_connect(G_OBJECT(StatusIcon), 'popup-menu', TGCallback(@OnStatusPopup), nil);
   g_signal_connect(G_OBJECT(StatusIcon), 'activate', TGCallback(@OnStatusActivate), nil);
+
+  TrayWin := gtk_window_new(GTK_WINDOW_TOPLEVEL);
+  gtk_window_set_title(PGtkWindow(TrayWin), 'Lemmings Overlay');
+  gtk_window_set_decorated(PGtkWindow(TrayWin), False);
+  gtk_window_set_keep_above(PGtkWindow(TrayWin), True);
+  gtk_window_set_skip_taskbar_hint(PGtkWindow(TrayWin), True);
+  gtk_window_set_skip_pager_hint(PGtkWindow(TrayWin), True);
+  gtk_window_set_accept_focus(PGtkWindow(TrayWin), False);
+  gtk_widget_set_app_paintable(TrayWin, True);
+  gtk_widget_set_double_buffered(TrayWin, False);
+  gtk_widget_add_events(TrayWin, GDK_BUTTON_PRESS_MASK);
+  gtk_window_resize(PGtkWindow(TrayWin), BarW, BarH);
+  g_signal_connect(G_OBJECT(TrayWin), 'expose-event', TGCallback(@OnTrayExpose), nil);
+  g_signal_connect(G_OBJECT(TrayWin), 'button-press-event', TGCallback(@OnTrayClick), nil);
   Controller.Render;
   EnsurePix(BarPix, Controller.Bar.Width, Controller.Bar.Height);
   PixbufFromBuffer(BarPix, Controller.Bar);
@@ -821,8 +1015,8 @@ begin
     if Colormap <> nil then
       gtk_widget_set_colormap(Overlay, Colormap);
   end;
-  gtk_window_move(PGtkWindow(Overlay), 0, 0);
-  gtk_window_resize(PGtkWindow(Overlay), W, H);
+  gtk_window_move(PGtkWindow(Overlay), 0, PanelTopPx);
+  gtk_window_resize(PGtkWindow(Overlay), W, H - PanelTopPx);
   g_signal_connect(G_OBJECT(Overlay), 'delete-event', TGCallback(@OnQuit), nil);
   g_signal_connect(G_OBJECT(Overlay), 'map-event', TGCallback(@OnMap), nil);
   g_signal_connect(G_OBJECT(Overlay), 'realize', TGCallback(@OnRealize), nil);
@@ -840,6 +1034,7 @@ begin
     Otherwise the first frames are a white sheet over the desktop/panel. }
   gtk_widget_realize(Overlay);
   gtk_widget_realize(DrawArea);
+  PlaceOverlay;
   if not NeedShapeMask then
   begin
     SilenceBackground(Overlay);
@@ -852,14 +1047,19 @@ begin
   CollectDesktop;
   Present;
   gtk_widget_show_all(Overlay);
-  MakeClickThrough(Overlay);
+  MakeOverlayClickThrough;
   if NeedShapeMask then
     PresentShaped
   else
     ShapeOverlayWindows;
+  gtk_widget_realize(TrayWin);
+  PlaceTray;
+  gtk_widget_show_all(TrayWin);
+  PlaceTray;
   gtk_main;
   DestroyPix(OverlayPix);
   DestroyPix(BarPix);
+  DestroyPix(TrayBadge);
   DestroyColorPixmap;
   Controller.Free;
 end;
