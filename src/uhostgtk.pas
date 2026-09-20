@@ -2,10 +2,11 @@ unit uhostgtk;
 
 {$mode objfpc}{$H+}
 
-{ Linux GTK 2 click-through overlay + panel status icon. Same
-  TLemmingsController as macOS. FPC's gtk2 unit often omits status-icon
-  and a few Gdk symbols (same as Eyes), so those are cdecl externals.
-  Window bounds come from libX11, not the x / xlib Pascal units. }
+{ Linux GTK 2 click-through overlay + a 24x24 panel badge. Same
+  TLemmingsController as macOS. FPC's gtk2 unit often omits a few Gdk
+  symbols (same as Eyes), so those are cdecl externals. Window bounds
+  come from libX11, not the x / xlib Pascal units. lxpanel-pi has no
+  working XEmbed tray for GtkStatusIcon, so the menu is a tiny window. }
 
 interface
 
@@ -20,7 +21,6 @@ uses
   ulemmingconfig, ulemmingdesktop, ulemmingapp, ulemmingaudio, ulemmingrender;
 
 type
-  PGtkStatusIcon = Pointer;
   TXDisplay = Pointer;
   TXWindow = culong;
   PXWindow = ^TXWindow;
@@ -49,11 +49,9 @@ type
     screen: Pointer;
   end;
 
-function gtk_status_icon_new: PGtkStatusIcon; cdecl; external;
-procedure gtk_status_icon_set_from_pixbuf(icon: PGtkStatusIcon; pixbuf: PGdkPixbuf); cdecl; external;
-procedure gtk_status_icon_set_visible(icon: PGtkStatusIcon; visible: gboolean); cdecl; external;
-procedure gtk_status_icon_set_tooltip_text(icon: PGtkStatusIcon; text: Pgchar); cdecl; external;
 function gtk_widget_get_window(widget: PGtkWidget): PGdkWindow; cdecl; external;
+procedure gdk_window_set_override_redirect(window: PGdkWindow;
+  override_redirect: gboolean); cdecl; external;
 function gdk_screen_get_rgba_colormap(screen: PGdkScreen): PGdkColormap; cdecl; external;
 procedure gdk_window_input_shape_combine_region(window: PGdkWindow;
   shape_region: PGdkRegion; offset_x, offset_y: gint); cdecl; external;
@@ -89,7 +87,7 @@ const
 var
   Controller: TLemmingsController;
   Overlay: PGtkWidget;
-  StatusIcon: PGtkStatusIcon;
+  Chip: PGtkWidget;
   OverlayPix: PGdkPixbuf;
   BarPix: PGdkPixbuf;
   OverlayPm: PGdkPixmap;
@@ -612,26 +610,26 @@ begin
   ApplyShapedPixmap(TopWin);
 end;
 
-procedure PushStatusIcon;
+function MakeBadgePixbuf: PGdkPixbuf;
 var
-  Badge: PGdkPixbuf;
   SW, SH, SS, DS, X, Y: Integer;
   S, D: PByte;
 begin
-  { Opaque badge so a white Pi panel shows a walker, not an empty slot. }
-  if (StatusIcon = nil) or (BarPix = nil) then
+  { Opaque navy square with a walker, same size as the macOS menu extra. }
+  Result := nil;
+  if BarPix = nil then
     Exit;
   SW := gdk_pixbuf_get_width(BarPix);
   SH := gdk_pixbuf_get_height(BarPix);
-  Badge := gdk_pixbuf_new(GDK_COLORSPACE_RGB, True, 8, SW, SH);
-  if Badge = nil then
+  Result := gdk_pixbuf_new(GDK_COLORSPACE_RGB, True, 8, SW, SH);
+  if Result = nil then
     Exit;
   SS := gdk_pixbuf_get_rowstride(BarPix);
-  DS := gdk_pixbuf_get_rowstride(Badge);
+  DS := gdk_pixbuf_get_rowstride(Result);
   for Y := 0 to SH - 1 do
   begin
     S := PByte(gdk_pixbuf_get_pixels(BarPix)) + Y * SS;
-    D := PByte(gdk_pixbuf_get_pixels(Badge)) + Y * DS;
+    D := PByte(gdk_pixbuf_get_pixels(Result)) + Y * DS;
     for X := 0 to SW - 1 do
     begin
       if S[3] >= 40 then
@@ -652,9 +650,32 @@ begin
       Inc(D, 4);
     end;
   end;
-  gtk_status_icon_set_from_pixbuf(StatusIcon, Badge);
-  gtk_status_icon_set_visible(StatusIcon, True);
-  g_object_unref(Badge);
+end;
+
+procedure PlaceChip;
+var
+  X, Y: Integer;
+  GdkWin: PGdkWindow;
+begin
+  { Sit in the panel strip on the right. A 24x24 window here is the menu
+    extra; GtkStatusIcon never embeds in lxpanel-pi. }
+  if Chip = nil then
+    Exit;
+  X := ScreenWpx - BarW - 4;
+  if X < 0 then
+    X := 0;
+  Y := (PanelTopPx - BarH) div 2;
+  if Y < 0 then
+    Y := 0;
+  gtk_window_move(PGtkWindow(Chip), X, Y);
+  gtk_window_resize(PGtkWindow(Chip), BarW, BarH);
+  GdkWin := gtk_widget_get_window(Chip);
+  if GdkWin <> nil then
+  begin
+    gdk_window_move(GdkWin, X, Y);
+    gdk_window_resize(GdkWin, BarW, BarH);
+    gdk_window_raise(GdkWin);
+  end;
 end;
 
 procedure SilenceBackground(Win: PGtkWidget);
@@ -771,16 +792,34 @@ begin
   Result := Menu;
 end;
 
-procedure OnStatusPopup(Icon: PGtkStatusIcon; Button: guint; ActivateTime: guint32; Data: gpointer); cdecl;
+function OnChipButton(Widget: PGtkWidget; Event: PGdkEventButton;
+  Data: gpointer): gboolean; cdecl;
 begin
-  if Popup = nil then
-    Popup := BuildPopup;
-  gtk_menu_popup(PGtkMenu(Popup), nil, nil, nil, nil, Button, ActivateTime);
+  Result := False;
+  if Event = nil then
+    Exit;
+  if (Event^.button = 1) or (Event^.button = 3) then
+  begin
+    if Popup = nil then
+      Popup := BuildPopup;
+    { Popup at the pointer so the menu is under the badge, not at 0,0. }
+    gtk_menu_popup(PGtkMenu(Popup), nil, nil, nil, nil, Event^.button,
+      Event^.time);
+    Result := True;
+  end;
 end;
 
-procedure OnStatusActivate(Icon: PGtkStatusIcon; Data: gpointer); cdecl;
+procedure OnChipRealize(Widget: PGtkWidget; Data: gpointer); cdecl;
+var
+  GdkWin: PGdkWindow;
 begin
-  OnStatusPopup(Icon, 0, gtk_get_current_event_time(), Data);
+  GdkWin := gtk_widget_get_window(Widget);
+  if GdkWin = nil then
+    Exit;
+  { Only the 24x24 badge is override-redirect, so it can sit on the panel.
+    The fullscreen overlay must not. }
+  gdk_window_set_override_redirect(GdkWin, True);
+  PlaceChip;
 end;
 
 procedure PlaceOverlay;
@@ -879,12 +918,14 @@ procedure HostRun;
 var
   Screen: PGdkScreen;
   Colormap: PGdkColormap;
+  Badge: PGdkPixbuf;
   W, H: Integer;
 begin
   gtk_init(@argc, @argv);
   LastTrudge := 0;
   OverlayPix := nil;
   BarPix := nil;
+  Chip := nil;
   OverlayPm := nil;
   OverlayPmW := 0;
   OverlayPmH := 0;
@@ -901,16 +942,31 @@ begin
 
   Controller := TLemmingsController.Create(W, H, BarW, BarH, LoadConfig);
 
-  { Embed the tray icon before the overlay maps, same as Eyes. }
-  StatusIcon := gtk_status_icon_new;
-  gtk_status_icon_set_tooltip_text(StatusIcon, 'Lemmings Overlay');
-  gtk_status_icon_set_visible(StatusIcon, True);
-  g_signal_connect(G_OBJECT(StatusIcon), 'popup-menu', TGCallback(@OnStatusPopup), nil);
-  g_signal_connect(G_OBJECT(StatusIcon), 'activate', TGCallback(@OnStatusActivate), nil);
   Controller.Render;
   EnsurePix(BarPix, Controller.Bar.Width, Controller.Bar.Height);
   PixbufFromBuffer(BarPix, Controller.Bar);
-  PushStatusIcon;
+  Chip := gtk_window_new(GTK_WINDOW_TOPLEVEL);
+  gtk_window_set_title(PGtkWindow(Chip), 'Lemmings Overlay');
+  gtk_window_set_decorated(PGtkWindow(Chip), False);
+  gtk_window_set_resizable(PGtkWindow(Chip), False);
+  gtk_window_set_skip_taskbar_hint(PGtkWindow(Chip), True);
+  gtk_window_set_skip_pager_hint(PGtkWindow(Chip), True);
+  gtk_window_set_accept_focus(PGtkWindow(Chip), False);
+  gtk_window_set_keep_above(PGtkWindow(Chip), True);
+  gtk_window_set_type_hint(PGtkWindow(Chip), GDK_WINDOW_TYPE_HINT_UTILITY);
+  gtk_widget_set_size_request(Chip, BarW, BarH);
+  Badge := MakeBadgePixbuf;
+  gtk_container_add(PGtkContainer(Chip), gtk_image_new_from_pixbuf(Badge));
+  if Badge <> nil then
+    g_object_unref(Badge);
+  gtk_widget_set_tooltip_text(Chip, 'Lemmings Overlay');
+  gtk_widget_add_events(Chip, GDK_BUTTON_PRESS_MASK);
+  g_signal_connect(G_OBJECT(Chip), 'button-press-event',
+    TGCallback(@OnChipButton), nil);
+  g_signal_connect(G_OBJECT(Chip), 'realize', TGCallback(@OnChipRealize), nil);
+  PlaceChip;
+  gtk_widget_show_all(Chip);
+  PlaceChip;
 
   Overlay := gtk_window_new(GTK_WINDOW_TOPLEVEL);
   gtk_window_set_title(PGtkWindow(Overlay), 'Lemmings Overlay');
@@ -953,6 +1009,7 @@ begin
     PresentShaped
   else
     ShapeOverlayWindows;
+  PlaceChip;
   gtk_main;
   DestroyPix(OverlayPix);
   DestroyPix(BarPix);
