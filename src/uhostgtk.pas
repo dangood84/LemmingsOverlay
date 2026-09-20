@@ -91,8 +91,6 @@ var
   Overlay: PGtkWidget;
   DrawArea: PGtkWidget;
   StatusIcon: PGtkStatusIcon;
-  TrayWin: PGtkWidget;
-  TrayBadge: PGdkPixbuf;
   OverlayPix: PGdkPixbuf;
   BarPix: PGdkPixbuf;
   OverlayPm: PGdkPixmap;
@@ -611,51 +609,13 @@ begin
 end;
 
 procedure PushStatusIcon;
-var
-  Badge: PGdkPixbuf;
-  SW, SH, SS, DS, SD, X, Y: Integer;
-  S, D: PByte;
 begin
-  { RGB (no alpha) badge. lxpanel leaves a blank slot for an RGBA tray
-    image, and a keep-above overlay over the panel ate the clicks. }
+  { Same GtkStatusIcon path as Eyes. A second override-redirect badge and a
+    custom RGB conversion left a white tray hole and froze panel menus. }
   if (StatusIcon = nil) or (BarPix = nil) then
     Exit;
-  SW := gdk_pixbuf_get_width(BarPix);
-  SH := gdk_pixbuf_get_height(BarPix);
-  Badge := gdk_pixbuf_new(GDK_COLORSPACE_RGB, False, 8, SW, SH);
-  if Badge = nil then
-    Exit;
-  SS := gdk_pixbuf_get_rowstride(BarPix);
-  DS := gdk_pixbuf_get_rowstride(Badge);
-  SD := gdk_pixbuf_get_n_channels(Badge);
-  for Y := 0 to SH - 1 do
-  begin
-    S := PByte(gdk_pixbuf_get_pixels(BarPix)) + Y * SS;
-    D := PByte(gdk_pixbuf_get_pixels(Badge)) + Y * DS;
-    for X := 0 to SW - 1 do
-    begin
-      if S[3] >= 32 then
-      begin
-        D[0] := S[0];
-        D[1] := S[1];
-        D[2] := S[2];
-      end
-      else
-      begin
-        D[0] := 48;
-        D[1] := 110;
-        D[2] := 190;
-      end;
-      Inc(S, 4);
-      Inc(D, SD);
-    end;
-  end;
-  gtk_status_icon_set_from_pixbuf(StatusIcon, Badge);
+  gtk_status_icon_set_from_pixbuf(StatusIcon, BarPix);
   gtk_status_icon_set_visible(StatusIcon, True);
-  DestroyPix(TrayBadge);
-  TrayBadge := Badge;
-  if TrayWin <> nil then
-    gtk_widget_queue_draw(TrayWin);
 end;
 
 procedure SilenceBackground(Win: PGtkWidget);
@@ -804,59 +764,10 @@ begin
   GdkWin := gtk_widget_get_window(Overlay);
   if GdkWin = nil then
     Exit;
-  { libgtk omitted gtk_window_set_override_redirect; GDK still has this. }
-  gdk_window_set_override_redirect(GdkWin, True);
+  { Do not override-redirect: that stacks above panel menus and stops the
+    desktop from redrawing (stuck "English (UK)" menu). }
   gdk_window_move(GdkWin, 0, PanelTopPx);
   gdk_window_resize(GdkWin, ScreenWpx, H);
-end;
-
-procedure PlaceTray;
-var
-  X, Y: Integer;
-  GdkWin: PGdkWindow;
-begin
-  if TrayWin = nil then
-    Exit;
-  X := ScreenWpx - BarW - 8;
-  if X < 0 then
-    X := 0;
-  { Sit just under the panel, not inside it — the bar covers a window
-    placed in the panel strip, which made the badge disappear. }
-  Y := PanelTopPx + 4;
-  gtk_window_move(PGtkWindow(TrayWin), X, Y);
-  gtk_window_resize(PGtkWindow(TrayWin), BarW, BarH);
-  GdkWin := gtk_widget_get_window(TrayWin);
-  if GdkWin <> nil then
-  begin
-    gdk_window_set_override_redirect(GdkWin, True);
-    gdk_window_move(GdkWin, X, Y);
-    gdk_window_resize(GdkWin, BarW, BarH);
-    gdk_window_raise(GdkWin);
-  end;
-end;
-
-function OnTrayExpose(Widget: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
-var
-  Gc: PGdkGC;
-  W, H: Integer;
-begin
-  Result := True;
-  if (Widget^.window = nil) or (TrayBadge = nil) then
-    Exit;
-  W := gdk_pixbuf_get_width(TrayBadge);
-  H := gdk_pixbuf_get_height(TrayBadge);
-  Gc := gdk_gc_new(Widget^.window);
-  if Gc = nil then
-    Exit;
-  gdk_draw_rgb_image(Widget^.window, Gc, 0, 0, W, H, GDK_RGB_DITHER_NONE,
-    gdk_pixbuf_get_pixels(TrayBadge), gdk_pixbuf_get_rowstride(TrayBadge));
-  g_object_unref(Gc);
-end;
-
-function OnTrayClick(Widget: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
-begin
-  OnStatusPopup(StatusIcon, Event^.button.button, Event^.button.time, Data);
-  Result := True;
 end;
 
 function OnTick(Data: gpointer): gboolean; cdecl;
@@ -946,8 +857,6 @@ begin
   LastTrudge := 0;
   OverlayPix := nil;
   BarPix := nil;
-  TrayBadge := nil;
-  TrayWin := nil;
   OverlayPm := nil;
   OverlayPmW := 0;
   OverlayPmH := 0;
@@ -964,27 +873,12 @@ begin
 
   Controller := TLemmingsController.Create(W, H, BarW, BarH, LoadConfig);
 
-  { Embed the tray icon before the fullscreen overlay exists. Some panels
-    drop GtkStatusIcon once a keep-above screen-sized window is mapped. }
+  { Embed the tray icon before the overlay maps, same as Eyes. }
   StatusIcon := gtk_status_icon_new;
   gtk_status_icon_set_tooltip_text(StatusIcon, 'Lemmings Overlay');
   gtk_status_icon_set_visible(StatusIcon, True);
   g_signal_connect(G_OBJECT(StatusIcon), 'popup-menu', TGCallback(@OnStatusPopup), nil);
   g_signal_connect(G_OBJECT(StatusIcon), 'activate', TGCallback(@OnStatusActivate), nil);
-
-  TrayWin := gtk_window_new(GTK_WINDOW_TOPLEVEL);
-  gtk_window_set_title(PGtkWindow(TrayWin), 'Lemmings Overlay');
-  gtk_window_set_decorated(PGtkWindow(TrayWin), False);
-  gtk_window_set_keep_above(PGtkWindow(TrayWin), True);
-  gtk_window_set_skip_taskbar_hint(PGtkWindow(TrayWin), True);
-  gtk_window_set_skip_pager_hint(PGtkWindow(TrayWin), True);
-  gtk_window_set_accept_focus(PGtkWindow(TrayWin), False);
-  gtk_widget_set_app_paintable(TrayWin, True);
-  gtk_widget_set_double_buffered(TrayWin, False);
-  gtk_widget_add_events(TrayWin, GDK_BUTTON_PRESS_MASK);
-  gtk_window_resize(PGtkWindow(TrayWin), BarW, BarH);
-  g_signal_connect(G_OBJECT(TrayWin), 'expose-event', TGCallback(@OnTrayExpose), nil);
-  g_signal_connect(G_OBJECT(TrayWin), 'button-press-event', TGCallback(@OnTrayClick), nil);
   Controller.Render;
   EnsurePix(BarPix, Controller.Bar.Width, Controller.Bar.Height);
   PixbufFromBuffer(BarPix, Controller.Bar);
@@ -1044,14 +938,9 @@ begin
     PresentShaped
   else
     ShapeOverlayWindows;
-  gtk_widget_realize(TrayWin);
-  PlaceTray;
-  gtk_widget_show_all(TrayWin);
-  PlaceTray;
   gtk_main;
   DestroyPix(OverlayPix);
   DestroyPix(BarPix);
-  DestroyPix(TrayBadge);
   DestroyColorPixmap;
   Controller.Free;
 end;
