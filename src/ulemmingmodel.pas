@@ -475,10 +475,26 @@ begin
 
   NextX := L.X + L.Dir * WalkSpeed * Dt;
 
-  { Window closed / moved out from under them → empty air. }
+  { Window closed / moved out from under them → empty air, unless they are
+    already on the screen floor. Landing with Platform=-1 then immediately
+    falling again is why walkers "struggled" along the bottom on the Pi. }
   StillOn := PlatformUnderFeet(L.X, L.Y, -1);
   if StillOn < 0 then
   begin
+    if L.Y >= FDesk.ScreenH - Max(8.0, 8.0 * FScale) then
+    begin
+      L.Y := FDesk.ScreenH - 2;
+      L.Platform := -1;
+      L.PlatformId := 0;
+      if (NextX < -20 * FScale) or (NextX > FDesk.ScreenW + 20 * FScale) then
+      begin
+        L.State := lsGone;
+        L.SpawnIn := 0.8 + NextFloat * 1.4;
+      end
+      else
+        L.X := NextX;
+      Exit;
+    end;
     BeginFall(L, True);
     Exit;
   end;

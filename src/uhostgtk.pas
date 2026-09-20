@@ -67,6 +67,10 @@ function XGetWindowProperty(dpy: TXDisplay; w: TXWindow; prop: TXAtom;
   bytes_after: Pointer; prop_return: Pointer): cint; cdecl; external 'libX11.so.6';
 function XGetWindowAttributes(dpy: TXDisplay; w: TXWindow; attr: Pointer): cint; cdecl; external 'libX11.so.6';
 function XFree(p: Pointer): cint; cdecl; external 'libX11.so.6';
+function XTranslateCoordinates(dpy: TXDisplay; src, dest: TXWindow;
+  src_x, src_y: cint; dest_x, dest_y: Pcint; child_return: Pointer): LongInt;
+  cdecl; external 'libX11.so.6';
+function gdk_x11_drawable_get_xid(drawable: PGdkDrawable): TXWindow; cdecl; external;
 
 const
   BarW = 24;
@@ -86,6 +90,8 @@ var
   SfxPath: array[sfxTrudge..sfxYippee] of string;
   LastTrudge: QWord;
   Popup: PGtkWidget;
+  OverlayXid: TXWindow;
+  ScreenWpx, ScreenHpx: Integer;
 
 procedure DestroyPix(var Pix: PGdkPixbuf);
 begin
@@ -195,7 +201,8 @@ var
   NItems, BytesAfter: culong;
   Prop: Pointer;
   Wins: PXWindow;
-  Win: TXWindow;
+  Win, Child: TXWindow;
+  RootX, RootY: cint;
 begin
   Dpy := gdk_x11_get_default_xdisplay;
   if Dpy = nil then
@@ -216,16 +223,26 @@ begin
   for I := 0 to Integer(NItems) - 1 do
   begin
     Win := Wins[I];
+    if (OverlayXid <> 0) and (Win = OverlayXid) then
+      Continue;
     FillChar(Attr, SizeOf(Attr), 0);
     if XGetWindowAttributes(Dpy, Win, @Attr) = 0 then
       Continue;
     if Attr.map_state <> XIsViewable then
       Continue;
-    if (Attr.width < 80) or (Attr.height < 48) then
-      Continue;
     if Attr.override_redirect <> 0 then
       Continue;
-    AddDeskRect(Desk, Integer(Win), Attr.x, Attr.y, Attr.width, Attr.height, dkWindow);
+    { Client x/y are relative to the WM frame; ledges need root coords. }
+    RootX := Attr.x;
+    RootY := Attr.y;
+    Child := 0;
+    XTranslateCoordinates(Dpy, Win, Root, 0, 0, @RootX, @RootY, @Child);
+    if (Attr.width < 80) or (Attr.height < 48) then
+      Continue;
+    { Fullscreen clients (including this overlay) are not walkable floors. }
+    if (Attr.width >= ScreenWpx - 8) and (Attr.height >= ScreenHpx - 8) then
+      Continue;
+    AddDeskRect(Desk, Integer(Win), RootX, RootY, Attr.width, Attr.height, dkWindow);
   end;
   XFree(Prop);
 end;
@@ -242,8 +259,12 @@ begin
   W := gdk_screen_get_width(Screen);
   H := gdk_screen_get_height(Screen);
   Controller.Resize(W, H);
+  ScreenWpx := W;
+  ScreenHpx := H;
   ClearDesktop(Desk, Controller.Overlay.Width, Controller.Overlay.Height);
   AddDeskRect(Desk, 8001, 0, 24, Desk.ScreenW, 6, dkScreenTop);
+  { Always a floor: without it, walkers who land at ScreenH bounce fall/walk. }
+  AddDeskRect(Desk, 8002, 0, Desk.ScreenH - 48, Desk.ScreenW, 48, dkDock);
   WinBefore := Desk.Count;
   CollectX11Windows(Desk);
   if Desk.Count <= WinBefore then
@@ -369,12 +390,22 @@ end;
 function OnExpose(Widget: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
 var
   DestW, DestH: Integer;
+  Mask: PGdkPixmap;
 begin
-  Result := False;
+  Result := True; { stop GTK filling the overlay with the theme background (white on Pi). }
   if (OverlayPix = nil) or (Widget^.window = nil) then
     Exit;
   DestW := gdk_pixbuf_get_width(OverlayPix);
   DestH := gdk_pixbuf_get_height(OverlayPix);
+  { Pi / LXDE usually has no compositor, so RGBA pixels become an opaque white
+    sheet. A 1-bit shape mask punches the window to only the walker pixels. }
+  Mask := gdk_pixmap_new(Widget^.window, DestW, DestH, 1);
+  if Mask <> nil then
+  begin
+    gdk_pixbuf_render_threshold_alpha(OverlayPix, Mask, 0, 0, 0, 0, DestW, DestH, 12);
+    gdk_window_shape_combine_mask(Widget^.window, Mask, 0, 0);
+    g_object_unref(Mask);
+  end;
   gdk_pixbuf_render_to_drawable(OverlayPix, Widget^.window,
     Widget^.style^.fg_gc[GTK_WIDGET_STATE(Widget)],
     0, 0, 0, 0, DestW, DestH, GDK_RGB_DITHER_NONE, 0, 0);
@@ -394,8 +425,16 @@ begin
 end;
 
 function OnMap(Widget: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
+var
+  GdkWin: PGdkWindow;
 begin
   MakeClickThrough(Widget);
+  GdkWin := gtk_widget_get_window(Widget);
+  if GdkWin <> nil then
+  begin
+    gdk_window_set_back_pixmap(GdkWin, nil, False);
+    OverlayXid := gdk_x11_drawable_get_xid(GdkWin);
+  end;
   Result := False;
 end;
 
@@ -410,11 +449,14 @@ begin
   OverlayPix := nil;
   BarPix := nil;
   Popup := nil;
+  OverlayXid := 0;
   WriteSfxFiles;
 
   Screen := gdk_screen_get_default;
   W := gdk_screen_get_width(Screen);
   H := gdk_screen_get_height(Screen);
+  ScreenWpx := W;
+  ScreenHpx := H;
   Controller := TLemmingsController.Create(W, H, BarW, BarH, LoadConfig);
 
   Overlay := gtk_window_new(GTK_WINDOW_TOPLEVEL);
@@ -434,6 +476,7 @@ begin
   g_signal_connect(G_OBJECT(Overlay), 'map-event', TGCallback(@OnMap), nil);
 
   DrawArea := gtk_drawing_area_new;
+  gtk_widget_set_app_paintable(DrawArea, True);
   gtk_container_add(PGtkContainer(Overlay), DrawArea);
   g_signal_connect(G_OBJECT(DrawArea), 'expose-event', TGCallback(@OnExpose), nil);
 

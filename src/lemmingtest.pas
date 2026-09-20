@@ -159,6 +159,15 @@ begin
     end;
     ExpectTrue('trudge while walking', SawTrudge);
 
+    { Soft-land on the screen floor with no window underfoot: keep walking,
+      do not fall/splat in a loop. }
+    ClearDesktop(Desk, 800, 500);
+    M.SetDesktop(Desk);
+    M.ForceLemming(0, lsWalk, 200, 498, 1, -1, 0);
+    M.Update(1 / 30);
+    ExpectEq('floor stays walking', Ord(M.Lemming(0).State), Ord(lsWalk));
+    ExpectTrue('floor advances', M.Lemming(0).X > 200);
+
     M.PlaceCataloguePose(800, 500);
     ExpectEq('catalogue count', M.LemmingCount, 6);
     ExpectEq('catalogue walk', Ord(M.Lemming(0).State), Ord(lsWalk));
