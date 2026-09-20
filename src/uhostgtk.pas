@@ -93,6 +93,8 @@ var
   StatusIcon: PGtkStatusIcon;
   OverlayPix: PGdkPixbuf;
   BarPix: PGdkPixbuf;
+  OverlayPm: PGdkPixmap;
+  OverlayPmW, OverlayPmH: Integer;
   SfxWav: array[sfxTrudge..sfxYippee] of TBytes;
   SfxPath: array[sfxTrudge..sfxYippee] of string;
   LastTrudge: QWord;
@@ -440,24 +442,129 @@ begin
     ShapeToPixbuf(DrawWin, OverlayPix);
 end;
 
-procedure PaintShapedWindow(GdkWin: PGdkWindow);
+procedure DestroyColorPixmap;
+begin
+  if OverlayPm <> nil then
+  begin
+    g_object_unref(OverlayPm);
+    OverlayPm := nil;
+  end;
+  OverlayPmW := 0;
+  OverlayPmH := 0;
+end;
+
+procedure EnsureColorPixmap(GdkWin: PGdkWindow; W, H: Integer);
+begin
+  if (GdkWin = nil) or (W < 1) or (H < 1) then
+    Exit;
+  if (OverlayPm <> nil) and (OverlayPmW = W) and (OverlayPmH = H) then
+    Exit;
+  DestroyColorPixmap;
+  OverlayPm := gdk_pixmap_new(GdkWin, W, H, -1);
+  if OverlayPm <> nil then
+  begin
+    OverlayPmW := W;
+    OverlayPmH := H;
+  end;
+end;
+
+procedure FillColorPixmap;
 var
   Gc: PGdkGC;
+begin
+  if (OverlayPm = nil) or (OverlayPix = nil) then
+    Exit;
+  Gc := gdk_gc_new(OverlayPm);
+  if Gc = nil then
+    Exit;
+  gdk_draw_rgb_32_image(OverlayPm, Gc, 0, 0, OverlayPmW, OverlayPmH,
+    GDK_RGB_DITHER_NONE, gdk_pixbuf_get_pixels(OverlayPix),
+    gdk_pixbuf_get_rowstride(OverlayPix));
+  g_object_unref(Gc);
+end;
+
+procedure ApplyShapedPixmap(GdkWin: PGdkWindow);
+begin
+  { Install the colour pixmap as the X background BEFORE reshaping. Expose
+    then copies that pixmap instead of filling the GTK theme white — the
+    DirectX-style white flicker. }
+  if GdkWin = nil then
+    Exit;
+  if OverlayPm <> nil then
+    gdk_window_set_back_pixmap(GdkWin, OverlayPm, False);
+  ShapeToPixbuf(GdkWin, OverlayPix);
+  if OverlayPm <> nil then
+    gdk_window_clear(GdkWin);
+end;
+
+procedure PresentShaped;
+var
+  TopWin, DrawWin: PGdkWindow;
   W, H: Integer;
 begin
-  { GdkRGB copies the pixbuf's R,G,B into the window visual. The alpha blit
-    on a shaped GTK widget stamps the mask with the theme colour, which on
-    the Pi is white — hence white walkers and white ledge lines. }
-  if (GdkWin = nil) or (OverlayPix = nil) then
+  if OverlayPix = nil then
+    Exit;
+  TopWin := nil;
+  DrawWin := nil;
+  if Overlay <> nil then
+    TopWin := gtk_widget_get_window(Overlay);
+  if DrawArea <> nil then
+    DrawWin := gtk_widget_get_window(DrawArea);
+  if TopWin = nil then
     Exit;
   W := gdk_pixbuf_get_width(OverlayPix);
   H := gdk_pixbuf_get_height(OverlayPix);
-  Gc := gdk_gc_new(GdkWin);
-  if Gc = nil then
+  EnsureColorPixmap(TopWin, W, H);
+  FillColorPixmap;
+  ApplyShapedPixmap(TopWin);
+  if (DrawWin <> nil) and (DrawWin <> TopWin) then
+    ApplyShapedPixmap(DrawWin);
+end;
+
+procedure PushStatusIcon;
+var
+  Badge: PGdkPixbuf;
+  SW, SH, SS, DS, X, Y: Integer;
+  S, D: PByte;
+begin
+  { Opaque badge so lxpanel always has something to click. A transparent
+    24×24 walker disappears on a dark Raspberry Pi tray. }
+  if (StatusIcon = nil) or (BarPix = nil) then
     Exit;
-  gdk_draw_rgb_32_image(GdkWin, Gc, 0, 0, W, H, GDK_RGB_DITHER_NONE,
-    gdk_pixbuf_get_pixels(OverlayPix), gdk_pixbuf_get_rowstride(OverlayPix));
-  g_object_unref(Gc);
+  SW := gdk_pixbuf_get_width(BarPix);
+  SH := gdk_pixbuf_get_height(BarPix);
+  Badge := gdk_pixbuf_new(GDK_COLORSPACE_RGB, True, 8, SW, SH);
+  if Badge = nil then
+    Exit;
+  SS := gdk_pixbuf_get_rowstride(BarPix);
+  DS := gdk_pixbuf_get_rowstride(Badge);
+  for Y := 0 to SH - 1 do
+  begin
+    S := PByte(gdk_pixbuf_get_pixels(BarPix)) + Y * SS;
+    D := PByte(gdk_pixbuf_get_pixels(Badge)) + Y * DS;
+    for X := 0 to SW - 1 do
+    begin
+      if S[3] >= 32 then
+      begin
+        D[0] := S[0];
+        D[1] := S[1];
+        D[2] := S[2];
+        D[3] := 255;
+      end
+      else
+      begin
+        D[0] := 24;
+        D[1] := 32;
+        D[2] := 56;
+        D[3] := 255;
+      end;
+      Inc(S, 4);
+      Inc(D, 4);
+    end;
+  end;
+  gtk_status_icon_set_from_pixbuf(StatusIcon, Badge);
+  gtk_status_icon_set_visible(StatusIcon, True);
+  g_object_unref(Badge);
 end;
 
 procedure SilenceBackground(Win: PGtkWidget);
@@ -481,24 +588,18 @@ begin
   PixbufFromBuffer(BarPix, Controller.Bar);
   if NeedShapeMask then
     HardenPixbufAlpha(OverlayPix, ShapeAlpha);
-  HardenPixbufAlpha(BarPix, ShapeAlpha);
   Controller.ConsumePresent;
-  ShapeOverlayWindows;
-  if Overlay <> nil then
+  if NeedShapeMask then
+    PresentShaped
+  else
   begin
-    PaintShapedWindow(gtk_widget_get_window(Overlay));
-    gtk_widget_queue_draw(Overlay);
+    ShapeOverlayWindows;
+    if Overlay <> nil then
+      gtk_widget_queue_draw(Overlay);
+    if DrawArea <> nil then
+      gtk_widget_queue_draw(DrawArea);
   end;
-  if DrawArea <> nil then
-  begin
-    PaintShapedWindow(gtk_widget_get_window(DrawArea));
-    gtk_widget_queue_draw(DrawArea);
-  end;
-  if (StatusIcon <> nil) and (BarPix <> nil) then
-  begin
-    gtk_status_icon_set_from_pixbuf(StatusIcon, BarPix);
-    gtk_status_icon_set_visible(StatusIcon, True);
-  end;
+  PushStatusIcon;
 end;
 
 procedure OnQuit(Widget: PGtkWidget; Data: gpointer); cdecl;
@@ -612,8 +713,10 @@ begin
   Result := True; { do not let GTK paint the default white/grey background }
   if Widget^.window = nil then
     Exit;
-  ShapeOverlayWindows;
-  PaintShapedWindow(Widget^.window);
+  if NeedShapeMask then
+    ApplyShapedPixmap(Widget^.window)
+  else
+    ShapeOverlayWindows;
 end;
 
 procedure MakeClickThrough(Win: PGtkWidget);
@@ -673,6 +776,9 @@ begin
   LastTrudge := 0;
   OverlayPix := nil;
   BarPix := nil;
+  OverlayPm := nil;
+  OverlayPmW := 0;
+  OverlayPmH := 0;
   Popup := nil;
   OverlayXid := 0;
   NeedShapeMask := not CompositorIsRunning;
@@ -685,6 +791,18 @@ begin
   ScreenWpx := W;
   ScreenHpx := H;
   Controller := TLemmingsController.Create(W, H, BarW, BarH, LoadConfig);
+
+  { Embed the tray icon before the fullscreen overlay exists. Some panels
+    drop GtkStatusIcon once a keep-above screen-sized window is mapped. }
+  StatusIcon := gtk_status_icon_new;
+  gtk_status_icon_set_tooltip_text(StatusIcon, 'Lemmings Overlay');
+  gtk_status_icon_set_visible(StatusIcon, True);
+  g_signal_connect(G_OBJECT(StatusIcon), 'popup-menu', TGCallback(@OnStatusPopup), nil);
+  g_signal_connect(G_OBJECT(StatusIcon), 'activate', TGCallback(@OnStatusActivate), nil);
+  Controller.Render;
+  EnsurePix(BarPix, Controller.Bar.Width, Controller.Bar.Height);
+  PixbufFromBuffer(BarPix, Controller.Bar);
+  PushStatusIcon;
 
   Overlay := gtk_window_new(GTK_WINDOW_TOPLEVEL);
   gtk_window_set_title(PGtkWindow(Overlay), 'Lemmings Overlay');
@@ -717,12 +835,6 @@ begin
   g_signal_connect(G_OBJECT(DrawArea), 'realize', TGCallback(@OnRealize), nil);
   g_signal_connect(G_OBJECT(DrawArea), 'expose-event', TGCallback(@OnExpose), nil);
 
-  StatusIcon := gtk_status_icon_new;
-  gtk_status_icon_set_tooltip_text(StatusIcon, 'Lemmings Overlay');
-  gtk_status_icon_set_visible(StatusIcon, True);
-  g_signal_connect(G_OBJECT(StatusIcon), 'popup-menu', TGCallback(@OnStatusPopup), nil);
-  g_signal_connect(G_OBJECT(StatusIcon), 'activate', TGCallback(@OnStatusActivate), nil);
-
   g_timeout_add(TickMs, TGSourceFunc(@OnTick), nil);
   { Realize first so we can punch an empty shape before the window maps.
     Otherwise the first frames are a white sheet over the desktop/panel. }
@@ -741,12 +853,14 @@ begin
   Present;
   gtk_widget_show_all(Overlay);
   MakeClickThrough(Overlay);
-  ShapeOverlayWindows;
-  if gtk_widget_get_window(Overlay) <> nil then
-    gdk_window_raise(gtk_widget_get_window(Overlay));
+  if NeedShapeMask then
+    PresentShaped
+  else
+    ShapeOverlayWindows;
   gtk_main;
   DestroyPix(OverlayPix);
   DestroyPix(BarPix);
+  DestroyColorPixmap;
   Controller.Free;
 end;
 
