@@ -80,7 +80,11 @@ const
   BarH = 24;
   TickMs = 33;
   XA_WINDOW = 33;
+  XA_CARDINAL = 6;
   XIsViewable = 2;
+  { Pixels below this stay out of the 1-bit mask and are not blitted. Ledge
+    outlines are ~0.35 (89), so 48 keeps them without the AA fringe. }
+  ShapeAlpha = 48;
 
 var
   Controller: TLemmingsController;
@@ -95,6 +99,8 @@ var
   Popup: PGtkWidget;
   OverlayXid: TXWindow;
   ScreenWpx, ScreenHpx: Integer;
+  NeedShapeMask: Boolean;
+  PanelTopPx: Integer;
 
 procedure DestroyPix(var Pix: PGdkPixbuf);
 begin
@@ -275,6 +281,94 @@ begin
   Controller.SetDesktop(Desk);
 end;
 
+function ReadWorkareaTop: Integer;
+var
+  Dpy: TXDisplay;
+  Root: TXWindow;
+  AtomList, AtomType: TXAtom;
+  Format: cint;
+  NItems, BytesAfter: culong;
+  Prop: Pointer;
+  Vals: pculong;
+begin
+  { _NET_WORKAREA y is the panel height. Keep that strip out of the overlay
+    so the GtkStatusIcon on the Pi panel stays clickable. }
+  Result := 0;
+  Dpy := gdk_x11_get_default_xdisplay;
+  if Dpy = nil then
+    Exit;
+  Root := XDefaultRootWindow(Dpy);
+  AtomList := XInternAtom(Dpy, '_NET_WORKAREA', 1);
+  if AtomList = 0 then
+    Exit;
+  Prop := nil;
+  if XGetWindowProperty(Dpy, Root, AtomList, 0, 4, 0, XA_CARDINAL,
+     @AtomType, @Format, @NItems, @BytesAfter, @Prop) <> 0 then
+    Exit;
+  if (Prop <> nil) and (NItems >= 4) then
+  begin
+    Vals := pculong(Prop);
+    Result := Integer(Vals[1]);
+    if Result < 0 then
+      Result := 0;
+    if Result > 96 then
+      Result := 36;
+  end;
+  if Prop <> nil then
+    XFree(Prop);
+  { lxpanel often omits _NET_WORKAREA; keep a typical strip free anyway. }
+  if Result = 0 then
+    Result := 36;
+end;
+
+procedure HardenPixbufAlpha(Pix: PGdkPixbuf; Threshold: Integer);
+var
+  Pixels, P: PByte;
+  W, H, Stride, X, Y: Integer;
+begin
+  { 1-bit shaped windows cannot composite. Semi-transparent pixels (walker
+    edges, ledge outlines) were blended onto black and showed as silhouettes. }
+  if (Pix = nil) or (not gdk_pixbuf_get_has_alpha(Pix)) then
+    Exit;
+  W := gdk_pixbuf_get_width(Pix);
+  H := gdk_pixbuf_get_height(Pix);
+  Stride := gdk_pixbuf_get_rowstride(Pix);
+  Pixels := PByte(gdk_pixbuf_get_pixels(Pix));
+  for Y := 0 to H - 1 do
+  begin
+    P := Pixels + Y * Stride;
+    for X := 0 to W - 1 do
+    begin
+      if P[3] < Threshold then
+      begin
+        P[0] := 0;
+        P[1] := 0;
+        P[2] := 0;
+        P[3] := 0;
+      end
+      else
+        P[3] := 255;
+      Inc(P, 4);
+    end;
+  end;
+end;
+
+procedure MaskOutPanel(Mask: PGdkPixmap; W, Top: Integer);
+var
+  Gc: PGdkGC;
+  Col: TGdkColor;
+begin
+  if (Mask = nil) or (Top <= 0) or (W < 1) then
+    Exit;
+  FillChar(Col, SizeOf(Col), 0);
+  Gc := gdk_gc_new(Mask);
+  if Gc = nil then
+    Exit;
+  gdk_gc_set_foreground(Gc, @Col);
+  gdk_draw_rectangle(Mask, Gc, True, 0, 0, W, Top);
+  g_object_unref(Gc);
+end;
+
 procedure HideAllPixels(GdkWin: PGdkWindow);
 var
   Region: PGdkRegion;
@@ -321,7 +415,9 @@ begin
   Mask := gdk_pixmap_new(GdkWin, DestW, DestH, 1);
   if Mask = nil then
     Exit;
-  gdk_pixbuf_render_threshold_alpha(Pix, Mask, 0, 0, 0, 0, DestW, DestH, 12);
+  gdk_pixbuf_render_threshold_alpha(Pix, Mask, 0, 0, 0, 0, DestW, DestH, ShapeAlpha);
+  if NeedShapeMask then
+    MaskOutPanel(Mask, DestW, PanelTopPx);
   gdk_window_shape_combine_mask(GdkWin, Mask, 0, 0);
   g_object_unref(Mask);
 end;
@@ -363,6 +459,9 @@ begin
   EnsurePix(BarPix, Controller.Bar.Width, Controller.Bar.Height);
   PixbufFromBuffer(OverlayPix, Controller.Overlay);
   PixbufFromBuffer(BarPix, Controller.Bar);
+  if NeedShapeMask then
+    HardenPixbufAlpha(OverlayPix, ShapeAlpha);
+  HardenPixbufAlpha(BarPix, ShapeAlpha);
   Controller.ConsumePresent;
   ShapeOverlayWindows;
   if Overlay <> nil then
@@ -370,7 +469,10 @@ begin
   if DrawArea <> nil then
     gtk_widget_queue_draw(DrawArea);
   if (StatusIcon <> nil) and (BarPix <> nil) then
+  begin
     gtk_status_icon_set_from_pixbuf(StatusIcon, BarPix);
+    gtk_status_icon_set_visible(StatusIcon, True);
+  end;
 end;
 
 procedure OnQuit(Widget: PGtkWidget; Data: gpointer); cdecl;
@@ -464,6 +566,11 @@ begin
   gtk_menu_popup(PGtkMenu(Popup), nil, nil, nil, nil, Button, ActivateTime);
 end;
 
+procedure OnStatusActivate(Icon: PGtkStatusIcon; Data: gpointer); cdecl;
+begin
+  OnStatusPopup(Icon, 0, gtk_get_current_event_time(), Data);
+end;
+
 function OnTick(Data: gpointer): gboolean; cdecl;
 begin
   CollectDesktop;
@@ -486,9 +593,17 @@ begin
     Exit;
   DestW := gdk_pixbuf_get_width(OverlayPix);
   DestH := gdk_pixbuf_get_height(OverlayPix);
-  gdk_pixbuf_render_to_drawable(OverlayPix, Widget^.window,
-    Widget^.style^.fg_gc[GTK_WIDGET_STATE(Widget)],
-    0, 0, 0, 0, DestW, DestH, GDK_RGB_DITHER_NONE, 0, 0);
+  { Bilevel: draw opaque RGB only. Full-alpha blit onto a None background
+    leaves shaped pixels unpainted, which on the Pi shows leftover VRAM
+    (old terminals, black silhouettes) as walkers move. }
+  if NeedShapeMask then
+    gdk_pixbuf_render_to_drawable_alpha(OverlayPix, Widget^.window,
+      0, 0, 0, 0, DestW, DestH, 0, ShapeAlpha,
+      GDK_RGB_DITHER_NONE, 0, 0)
+  else
+    gdk_pixbuf_render_to_drawable_alpha(OverlayPix, Widget^.window,
+      0, 0, 0, 0, DestW, DestH, 1, 0,
+      GDK_RGB_DITHER_NONE, 0, 0);
 end;
 
 procedure MakeClickThrough(Win: PGtkWidget);
@@ -506,7 +621,9 @@ end;
 
 procedure OnRealize(Widget: PGtkWidget; Data: gpointer); cdecl;
 begin
-  SilenceBackground(Widget);
+  { None background + a 1-bit shape leaves unpainted pixels as stale VRAM. }
+  if not NeedShapeMask then
+    SilenceBackground(Widget);
   { Do not punch an empty hole if the first frame is already in OverlayPix —
     show_all can realize the drawing area after Present. }
   if OverlayPix = nil then
@@ -523,8 +640,11 @@ var
   GdkWin: PGdkWindow;
 begin
   MakeClickThrough(Widget);
-  SilenceBackground(Overlay);
-  SilenceBackground(DrawArea);
+  if not NeedShapeMask then
+  begin
+    SilenceBackground(Overlay);
+    SilenceBackground(DrawArea);
+  end;
   GdkWin := gtk_widget_get_window(Widget);
   if GdkWin <> nil then
     OverlayXid := gdk_x11_drawable_get_xid(GdkWin);
@@ -545,6 +665,8 @@ begin
   BarPix := nil;
   Popup := nil;
   OverlayXid := 0;
+  NeedShapeMask := not CompositorIsRunning;
+  PanelTopPx := ReadWorkareaTop;
   WriteSfxFiles;
 
   Screen := gdk_screen_get_default;
@@ -565,7 +687,7 @@ begin
   gtk_widget_set_double_buffered(Overlay, False);
   { Only use ARGB if a compositor is actually compositing. On the Pi the
     rgba colormap exists but is painted as an opaque white screen. }
-  if CompositorIsRunning then
+  if not NeedShapeMask then
   begin
     Colormap := gdk_screen_get_rgba_colormap(Screen);
     if Colormap <> nil then
@@ -589,14 +711,18 @@ begin
   gtk_status_icon_set_tooltip_text(StatusIcon, 'Lemmings Overlay');
   gtk_status_icon_set_visible(StatusIcon, True);
   g_signal_connect(G_OBJECT(StatusIcon), 'popup-menu', TGCallback(@OnStatusPopup), nil);
+  g_signal_connect(G_OBJECT(StatusIcon), 'activate', TGCallback(@OnStatusActivate), nil);
 
   g_timeout_add(TickMs, TGSourceFunc(@OnTick), nil);
   { Realize first so we can punch an empty shape before the window maps.
     Otherwise the first frames are a white sheet over the desktop/panel. }
   gtk_widget_realize(Overlay);
   gtk_widget_realize(DrawArea);
-  SilenceBackground(Overlay);
-  SilenceBackground(DrawArea);
+  if not NeedShapeMask then
+  begin
+    SilenceBackground(Overlay);
+    SilenceBackground(DrawArea);
+  end;
   if gtk_widget_get_window(Overlay) <> nil then
     HideAllPixels(gtk_widget_get_window(Overlay));
   if gtk_widget_get_window(DrawArea) <> nil then
