@@ -365,7 +365,7 @@ begin
   if Gc = nil then
     Exit;
   gdk_gc_set_foreground(Gc, @Col);
-  gdk_draw_rectangle(Mask, Gc, True, 0, 0, W, Top);
+  gdk_draw_rectangle(Mask, Gc, 1, 0, 0, W, Top);
   g_object_unref(Gc);
 end;
 
@@ -598,11 +598,11 @@ begin
     (old terminals, black silhouettes) as walkers move. }
   if NeedShapeMask then
     gdk_pixbuf_render_to_drawable_alpha(OverlayPix, Widget^.window,
-      0, 0, 0, 0, DestW, DestH, 0, ShapeAlpha,
+      0, 0, 0, 0, DestW, DestH, GDK_PIXBUF_ALPHA_BILEVEL, ShapeAlpha,
       GDK_RGB_DITHER_NONE, 0, 0)
   else
     gdk_pixbuf_render_to_drawable_alpha(OverlayPix, Widget^.window,
-      0, 0, 0, 0, DestW, DestH, 1, 0,
+      0, 0, 0, 0, DestW, DestH, GDK_PIXBUF_ALPHA_FULL, 0,
       GDK_RGB_DITHER_NONE, 0, 0);
 end;
 
