@@ -651,9 +651,7 @@ begin
     end;
   end;
   gtk_status_icon_set_from_pixbuf(StatusIcon, Badge);
-  { The XEmbed plug was clipping to a few pixels above the language icon,
-    off the top of the screen. Keep it hidden; TrayWin is the menu extra. }
-  gtk_status_icon_set_visible(StatusIcon, False);
+  gtk_status_icon_set_visible(StatusIcon, True);
   DestroyPix(TrayBadge);
   TrayBadge := Badge;
   if TrayWin <> nil then
@@ -822,15 +820,9 @@ begin
   X := ScreenWpx - BarW - 8;
   if X < 0 then
     X := 0;
-  Y := (PanelTopPx - BarH) div 2;
-  if Y < 2 then
-    Y := 2;
-  if Y + BarH > PanelTopPx then
-  begin
-    Y := PanelTopPx - BarH - 2;
-    if Y < 2 then
-      Y := 2;
-  end;
+  { Sit just under the panel, not inside it — the bar covers a window
+    placed in the panel strip, which made the badge disappear. }
+  Y := PanelTopPx + 4;
   gtk_window_move(PGtkWindow(TrayWin), X, Y);
   gtk_window_resize(PGtkWindow(TrayWin), BarW, BarH);
   GdkWin := gtk_widget_get_window(TrayWin);
@@ -976,7 +968,7 @@ begin
     drop GtkStatusIcon once a keep-above screen-sized window is mapped. }
   StatusIcon := gtk_status_icon_new;
   gtk_status_icon_set_tooltip_text(StatusIcon, 'Lemmings Overlay');
-  gtk_status_icon_set_visible(StatusIcon, False);
+  gtk_status_icon_set_visible(StatusIcon, True);
   g_signal_connect(G_OBJECT(StatusIcon), 'popup-menu', TGCallback(@OnStatusPopup), nil);
   g_signal_connect(G_OBJECT(StatusIcon), 'activate', TGCallback(@OnStatusActivate), nil);
 
