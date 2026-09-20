@@ -54,6 +54,8 @@ procedure gtk_status_icon_set_from_pixbuf(icon: PGtkStatusIcon; pixbuf: PGdkPixb
 procedure gtk_status_icon_set_visible(icon: PGtkStatusIcon; visible: gboolean); cdecl; external;
 procedure gtk_status_icon_set_tooltip_text(icon: PGtkStatusIcon; text: Pgchar); cdecl; external;
 function gtk_widget_get_window(widget: PGtkWidget): PGdkWindow; cdecl; external;
+procedure gtk_window_set_override_redirect(window: PGtkWindow;
+  override_redirect: gboolean); cdecl; external;
 function gdk_screen_get_rgba_colormap(screen: PGdkScreen): PGdkColormap; cdecl; external;
 procedure gdk_window_input_shape_combine_region(window: PGdkWindow;
   shape_region: PGdkRegion; offset_x, offset_y: gint); cdecl; external;
