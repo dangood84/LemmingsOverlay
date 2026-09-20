@@ -807,7 +807,7 @@ begin
   if GdkWin = nil then
     Exit;
   { libgtk omitted gtk_window_set_override_redirect; GDK still has this. }
-  gdk_window_set_override_redirect(GdkWin, 1);
+  gdk_window_set_override_redirect(GdkWin, True);
   gdk_window_move(GdkWin, 0, PanelTopPx);
   gdk_window_resize(GdkWin, ScreenWpx, H);
 end;
@@ -836,7 +836,7 @@ begin
   GdkWin := gtk_widget_get_window(TrayWin);
   if GdkWin <> nil then
   begin
-    gdk_window_set_override_redirect(GdkWin, 1);
+    gdk_window_set_override_redirect(GdkWin, True);
     gdk_window_move(GdkWin, X, Y);
     gdk_window_resize(GdkWin, BarW, BarH);
     gdk_window_raise(GdkWin);
