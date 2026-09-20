@@ -89,7 +89,6 @@ const
 var
   Controller: TLemmingsController;
   Overlay: PGtkWidget;
-  DrawArea: PGtkWidget;
   StatusIcon: PGtkStatusIcon;
   OverlayPix: PGdkPixbuf;
   BarPix: PGdkPixbuf;
@@ -400,8 +399,8 @@ begin
   end;
   if Prop <> nil then
     XFree(Prop);
-  if Result < 48 then
-    Result := 48;
+  if Result < 56 then
+    Result := 56;
   if Result > 96 then
     Result := 52;
 end;
@@ -505,22 +504,31 @@ begin
   g_object_unref(Mask);
 end;
 
+procedure PunchInput(GdkWin: PGdkWindow);
+var
+  Region: PGdkRegion;
+begin
+  { Empty input shape: clicks pass through to panel menus and apps. Re-apply
+    after each bounding-shape update; shape_combine_mask can reset it. }
+  if GdkWin = nil then
+    Exit;
+  Region := gdk_region_new;
+  gdk_window_input_shape_combine_region(GdkWin, Region, 0, 0);
+  gdk_region_destroy(Region);
+end;
+
 procedure ShapeOverlayWindows;
 var
-  TopWin, DrawWin: PGdkWindow;
+  TopWin: PGdkWindow;
 begin
-  { Shape the toplevel. Shaping only the drawing-area child leaves the parent
-    as a fullscreen white rectangle over the desktop and menu bar. }
-  TopWin := nil;
-  DrawWin := nil;
-  if Overlay <> nil then
-    TopWin := gtk_widget_get_window(Overlay);
-  if DrawArea <> nil then
-    DrawWin := gtk_widget_get_window(DrawArea);
+  if Overlay = nil then
+    Exit;
+  TopWin := gtk_widget_get_window(Overlay);
   if TopWin <> nil then
+  begin
     ShapeToPixbuf(TopWin, OverlayPix);
-  if (DrawWin <> nil) and (DrawWin <> TopWin) then
-    ShapeToPixbuf(DrawWin, OverlayPix);
+    PunchInput(TopWin);
+  end;
 end;
 
 procedure DestroyColorPixmap;
@@ -580,23 +588,21 @@ begin
   if OverlayPm <> nil then
     gdk_window_set_back_pixmap(GdkWin, OverlayPm, False);
   ShapeToPixbuf(GdkWin, OverlayPix);
+  PunchInput(GdkWin);
   if OverlayPm <> nil then
     gdk_window_clear(GdkWin);
 end;
 
 procedure PresentShaped;
 var
-  TopWin, DrawWin: PGdkWindow;
+  TopWin: PGdkWindow;
   W, H: Integer;
 begin
   if OverlayPix = nil then
     Exit;
-  TopWin := nil;
-  DrawWin := nil;
-  if Overlay <> nil then
-    TopWin := gtk_widget_get_window(Overlay);
-  if DrawArea <> nil then
-    DrawWin := gtk_widget_get_window(DrawArea);
+  if Overlay = nil then
+    Exit;
+  TopWin := gtk_widget_get_window(Overlay);
   if TopWin = nil then
     Exit;
   W := gdk_pixbuf_get_width(OverlayPix);
@@ -604,18 +610,51 @@ begin
   EnsureColorPixmap(TopWin, W, H);
   FillColorPixmap;
   ApplyShapedPixmap(TopWin);
-  if (DrawWin <> nil) and (DrawWin <> TopWin) then
-    ApplyShapedPixmap(DrawWin);
 end;
 
 procedure PushStatusIcon;
+var
+  Badge: PGdkPixbuf;
+  SW, SH, SS, DS, X, Y: Integer;
+  S, D: PByte;
 begin
-  { Same GtkStatusIcon path as Eyes. A second override-redirect badge and a
-    custom RGB conversion left a white tray hole and froze panel menus. }
+  { Opaque badge so a white Pi panel shows a walker, not an empty slot. }
   if (StatusIcon = nil) or (BarPix = nil) then
     Exit;
-  gtk_status_icon_set_from_pixbuf(StatusIcon, BarPix);
+  SW := gdk_pixbuf_get_width(BarPix);
+  SH := gdk_pixbuf_get_height(BarPix);
+  Badge := gdk_pixbuf_new(GDK_COLORSPACE_RGB, True, 8, SW, SH);
+  if Badge = nil then
+    Exit;
+  SS := gdk_pixbuf_get_rowstride(BarPix);
+  DS := gdk_pixbuf_get_rowstride(Badge);
+  for Y := 0 to SH - 1 do
+  begin
+    S := PByte(gdk_pixbuf_get_pixels(BarPix)) + Y * SS;
+    D := PByte(gdk_pixbuf_get_pixels(Badge)) + Y * DS;
+    for X := 0 to SW - 1 do
+    begin
+      if S[3] >= 40 then
+      begin
+        D[0] := S[0];
+        D[1] := S[1];
+        D[2] := S[2];
+        D[3] := 255;
+      end
+      else
+      begin
+        D[0] := 32;
+        D[1] := 56;
+        D[2] := 104;
+        D[3] := 255;
+      end;
+      Inc(S, 4);
+      Inc(D, 4);
+    end;
+  end;
+  gtk_status_icon_set_from_pixbuf(StatusIcon, Badge);
   gtk_status_icon_set_visible(StatusIcon, True);
+  g_object_unref(Badge);
 end;
 
 procedure SilenceBackground(Win: PGtkWidget);
@@ -647,8 +686,6 @@ begin
     ShapeOverlayWindows;
     if Overlay <> nil then
       gtk_widget_queue_draw(Overlay);
-    if DrawArea <> nil then
-      gtk_widget_queue_draw(DrawArea);
   end;
   PushStatusIcon;
 end;
@@ -806,10 +843,7 @@ end;
 
 procedure MakeOverlayClickThrough;
 begin
-  { The drawing-area child has its own X window. Shaping only the toplevel
-    still lets the child eat clicks on the panel icon. }
   MakeClickThrough(Overlay);
-  MakeClickThrough(DrawArea);
 end;
 
 procedure OnRealize(Widget: PGtkWidget; Data: gpointer); cdecl;
@@ -835,10 +869,7 @@ var
 begin
   MakeOverlayClickThrough;
   if not NeedShapeMask then
-  begin
     SilenceBackground(Overlay);
-    SilenceBackground(DrawArea);
-  end;
   GdkWin := gtk_widget_get_window(Widget);
   if GdkWin <> nil then
     OverlayXid := gdk_x11_drawable_get_xid(GdkWin);
@@ -908,28 +939,15 @@ begin
   g_signal_connect(G_OBJECT(Overlay), 'realize', TGCallback(@OnRealize), nil);
   g_signal_connect(G_OBJECT(Overlay), 'expose-event', TGCallback(@OnExpose), nil);
 
-  DrawArea := gtk_drawing_area_new;
-  gtk_widget_set_app_paintable(DrawArea, True);
-  gtk_widget_set_double_buffered(DrawArea, False);
-  gtk_container_add(PGtkContainer(Overlay), DrawArea);
-  g_signal_connect(G_OBJECT(DrawArea), 'realize', TGCallback(@OnRealize), nil);
-  g_signal_connect(G_OBJECT(DrawArea), 'expose-event', TGCallback(@OnExpose), nil);
-
   g_timeout_add(TickMs, TGSourceFunc(@OnTick), nil);
   { Realize first so we can punch an empty shape before the window maps.
     Otherwise the first frames are a white sheet over the desktop/panel. }
   gtk_widget_realize(Overlay);
-  gtk_widget_realize(DrawArea);
   PlaceOverlay;
   if not NeedShapeMask then
-  begin
     SilenceBackground(Overlay);
-    SilenceBackground(DrawArea);
-  end;
   if gtk_widget_get_window(Overlay) <> nil then
     HideAllPixels(gtk_widget_get_window(Overlay));
-  if gtk_widget_get_window(DrawArea) <> nil then
-    HideAllPixels(gtk_widget_get_window(DrawArea));
   CollectDesktop;
   Present;
   gtk_widget_show_all(Overlay);
