@@ -50,6 +50,7 @@ type
   end;
 
 function gtk_widget_get_window(widget: PGtkWidget): PGdkWindow; cdecl; external;
+procedure gtk_widget_set_tooltip_text(widget: PGtkWidget; text: Pgchar); cdecl; external;
 procedure gdk_window_set_override_redirect(window: PGdkWindow;
   override_redirect: gboolean); cdecl; external;
 function gdk_screen_get_rgba_colormap(screen: PGdkScreen): PGdkColormap; cdecl; external;
