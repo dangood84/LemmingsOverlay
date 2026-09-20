@@ -673,9 +673,7 @@ procedure Present;
 begin
   Controller.Render;
   EnsurePix(OverlayPix, Controller.Overlay.Width, Controller.Overlay.Height);
-  EnsurePix(BarPix, Controller.Bar.Width, Controller.Bar.Height);
   PixbufFromBuffer(OverlayPix, Controller.Overlay);
-  PixbufFromBuffer(BarPix, Controller.Bar);
   if NeedShapeMask then
     HardenPixbufAlpha(OverlayPix, ShapeAlpha);
   Controller.ConsumePresent;
@@ -687,7 +685,6 @@ begin
     if Overlay <> nil then
       gtk_widget_queue_draw(Overlay);
   end;
-  PushStatusIcon;
 end;
 
 procedure OnQuit(Widget: PGtkWidget; Data: gpointer); cdecl;
