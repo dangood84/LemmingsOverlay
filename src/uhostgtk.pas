@@ -57,6 +57,8 @@ function gtk_widget_get_window(widget: PGtkWidget): PGdkWindow; cdecl; external;
 function gdk_screen_get_rgba_colormap(screen: PGdkScreen): PGdkColormap; cdecl; external;
 procedure gdk_window_input_shape_combine_region(window: PGdkWindow;
   shape_region: PGdkRegion; offset_x, offset_y: gint); cdecl; external;
+procedure gdk_window_shape_combine_region(window: PGdkWindow;
+  shape_region: PGdkRegion; offset_x, offset_y: gint); cdecl; external;
 function gdk_x11_get_default_xdisplay: TXDisplay; cdecl; external;
 
 function XDefaultRootWindow(dpy: TXDisplay): TXWindow; cdecl; external 'libX11.so.6';
@@ -67,6 +69,7 @@ function XGetWindowProperty(dpy: TXDisplay; w: TXWindow; prop: TXAtom;
   bytes_after: Pointer; prop_return: Pointer): cint; cdecl; external 'libX11.so.6';
 function XGetWindowAttributes(dpy: TXDisplay; w: TXWindow; attr: Pointer): cint; cdecl; external 'libX11.so.6';
 function XFree(p: Pointer): cint; cdecl; external 'libX11.so.6';
+function XGetSelectionOwner(dpy: TXDisplay; selection: TXAtom): TXWindow; cdecl; external 'libX11.so.6';
 function XTranslateCoordinates(dpy: TXDisplay; src, dest: TXWindow;
   src_x, src_y: cint; dest_x, dest_y: Pcint; child_return: Pointer): LongInt;
   cdecl; external 'libX11.so.6';
@@ -272,6 +275,87 @@ begin
   Controller.SetDesktop(Desk);
 end;
 
+procedure HideAllPixels(GdkWin: PGdkWindow);
+var
+  Region: PGdkRegion;
+begin
+  { Empty shape: the X window occupies no pixels, so the desktop (and the
+    menu bar) stay visible until the first walker frame. }
+  if GdkWin = nil then
+    Exit;
+  Region := gdk_region_new;
+  gdk_window_shape_combine_region(GdkWin, Region, 0, 0);
+  gdk_region_destroy(Region);
+end;
+
+function CompositorIsRunning: Boolean;
+var
+  Dpy: TXDisplay;
+  Atom: TXAtom;
+begin
+  { RGBA visuals without a compositor become an opaque white sheet on the Pi. }
+  Result := False;
+  Dpy := gdk_x11_get_default_xdisplay;
+  if Dpy = nil then
+    Exit;
+  Atom := XInternAtom(Dpy, '_NET_WM_CM_S0', 1);
+  if Atom = 0 then
+    Exit;
+  Result := XGetSelectionOwner(Dpy, Atom) <> 0;
+end;
+
+procedure ShapeToPixbuf(GdkWin: PGdkWindow; Pix: PGdkPixbuf);
+var
+  Mask: PGdkPixmap;
+  DestW, DestH: Integer;
+begin
+  if GdkWin = nil then
+    Exit;
+  if Pix = nil then
+  begin
+    HideAllPixels(GdkWin);
+    Exit;
+  end;
+  DestW := gdk_pixbuf_get_width(Pix);
+  DestH := gdk_pixbuf_get_height(Pix);
+  Mask := gdk_pixmap_new(GdkWin, DestW, DestH, 1);
+  if Mask = nil then
+    Exit;
+  gdk_pixbuf_render_threshold_alpha(Pix, Mask, 0, 0, 0, 0, DestW, DestH, 12);
+  gdk_window_shape_combine_mask(GdkWin, Mask, 0, 0);
+  g_object_unref(Mask);
+end;
+
+procedure ShapeOverlayWindows;
+var
+  TopWin, DrawWin: PGdkWindow;
+begin
+  { Shape the toplevel. Shaping only the drawing-area child leaves the parent
+    as a fullscreen white rectangle over the desktop and menu bar. }
+  TopWin := nil;
+  DrawWin := nil;
+  if Overlay <> nil then
+    TopWin := gtk_widget_get_window(Overlay);
+  if DrawArea <> nil then
+    DrawWin := gtk_widget_get_window(DrawArea);
+  if TopWin <> nil then
+    ShapeToPixbuf(TopWin, OverlayPix);
+  if (DrawWin <> nil) and (DrawWin <> TopWin) then
+    ShapeToPixbuf(DrawWin, OverlayPix);
+end;
+
+procedure SilenceBackground(Win: PGtkWidget);
+var
+  GdkWin: PGdkWindow;
+begin
+  if Win = nil then
+    Exit;
+  GdkWin := gtk_widget_get_window(Win);
+  if GdkWin = nil then
+    Exit;
+  gdk_window_set_back_pixmap(GdkWin, nil, False);
+end;
+
 procedure Present;
 begin
   Controller.Render;
@@ -280,6 +364,9 @@ begin
   PixbufFromBuffer(OverlayPix, Controller.Overlay);
   PixbufFromBuffer(BarPix, Controller.Bar);
   Controller.ConsumePresent;
+  ShapeOverlayWindows;
+  if Overlay <> nil then
+    gtk_widget_queue_draw(Overlay);
   if DrawArea <> nil then
     gtk_widget_queue_draw(DrawArea);
   if (StatusIcon <> nil) and (BarPix <> nil) then
@@ -390,22 +477,15 @@ end;
 function OnExpose(Widget: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
 var
   DestW, DestH: Integer;
-  Mask: PGdkPixmap;
 begin
-  Result := True; { stop GTK filling the overlay with the theme background (white on Pi). }
-  if (OverlayPix = nil) or (Widget^.window = nil) then
+  Result := True; { do not let GTK paint the default white/grey background }
+  if Widget^.window = nil then
+    Exit;
+  ShapeOverlayWindows;
+  if OverlayPix = nil then
     Exit;
   DestW := gdk_pixbuf_get_width(OverlayPix);
   DestH := gdk_pixbuf_get_height(OverlayPix);
-  { Pi / LXDE usually has no compositor, so RGBA pixels become an opaque white
-    sheet. A 1-bit shape mask punches the window to only the walker pixels. }
-  Mask := gdk_pixmap_new(Widget^.window, DestW, DestH, 1);
-  if Mask <> nil then
-  begin
-    gdk_pixbuf_render_threshold_alpha(OverlayPix, Mask, 0, 0, 0, 0, DestW, DestH, 12);
-    gdk_window_shape_combine_mask(Widget^.window, Mask, 0, 0);
-    g_object_unref(Mask);
-  end;
   gdk_pixbuf_render_to_drawable(OverlayPix, Widget^.window,
     Widget^.style^.fg_gc[GTK_WIDGET_STATE(Widget)],
     0, 0, 0, 0, DestW, DestH, GDK_RGB_DITHER_NONE, 0, 0);
@@ -424,17 +504,32 @@ begin
   gdk_region_destroy(Region);
 end;
 
+procedure OnRealize(Widget: PGtkWidget; Data: gpointer); cdecl;
+begin
+  SilenceBackground(Widget);
+  { Do not punch an empty hole if the first frame is already in OverlayPix —
+    show_all can realize the drawing area after Present. }
+  if OverlayPix = nil then
+  begin
+    if gtk_widget_get_window(Widget) <> nil then
+      HideAllPixels(gtk_widget_get_window(Widget));
+  end
+  else
+    ShapeOverlayWindows;
+end;
+
 function OnMap(Widget: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
 var
   GdkWin: PGdkWindow;
 begin
   MakeClickThrough(Widget);
+  SilenceBackground(Overlay);
+  SilenceBackground(DrawArea);
   GdkWin := gtk_widget_get_window(Widget);
   if GdkWin <> nil then
-  begin
-    gdk_window_set_back_pixmap(GdkWin, nil, False);
     OverlayXid := gdk_x11_drawable_get_xid(GdkWin);
-  end;
+  { Re-apply walker shape if Present already ran; otherwise stay empty. }
+  ShapeOverlayWindows;
   Result := False;
 end;
 
@@ -467,17 +562,28 @@ begin
   gtk_window_set_skip_pager_hint(PGtkWindow(Overlay), True);
   gtk_window_set_accept_focus(PGtkWindow(Overlay), False);
   gtk_widget_set_app_paintable(Overlay, True);
-  Colormap := gdk_screen_get_rgba_colormap(Screen);
-  if Colormap <> nil then
-    gtk_widget_set_colormap(Overlay, Colormap);
+  gtk_widget_set_double_buffered(Overlay, False);
+  gtk_window_set_override_redirect(PGtkWindow(Overlay), True);
+  { Only use ARGB if a compositor is actually compositing. On the Pi the
+    rgba colormap exists but is painted as an opaque white screen. }
+  if CompositorIsRunning then
+  begin
+    Colormap := gdk_screen_get_rgba_colormap(Screen);
+    if Colormap <> nil then
+      gtk_widget_set_colormap(Overlay, Colormap);
+  end;
   gtk_window_move(PGtkWindow(Overlay), 0, 0);
   gtk_window_resize(PGtkWindow(Overlay), W, H);
   g_signal_connect(G_OBJECT(Overlay), 'delete-event', TGCallback(@OnQuit), nil);
   g_signal_connect(G_OBJECT(Overlay), 'map-event', TGCallback(@OnMap), nil);
+  g_signal_connect(G_OBJECT(Overlay), 'realize', TGCallback(@OnRealize), nil);
+  g_signal_connect(G_OBJECT(Overlay), 'expose-event', TGCallback(@OnExpose), nil);
 
   DrawArea := gtk_drawing_area_new;
   gtk_widget_set_app_paintable(DrawArea, True);
+  gtk_widget_set_double_buffered(DrawArea, False);
   gtk_container_add(PGtkContainer(Overlay), DrawArea);
+  g_signal_connect(G_OBJECT(DrawArea), 'realize', TGCallback(@OnRealize), nil);
   g_signal_connect(G_OBJECT(DrawArea), 'expose-event', TGCallback(@OnExpose), nil);
 
   StatusIcon := gtk_status_icon_new;
@@ -486,10 +592,23 @@ begin
   g_signal_connect(G_OBJECT(StatusIcon), 'popup-menu', TGCallback(@OnStatusPopup), nil);
 
   g_timeout_add(TickMs, TGSourceFunc(@OnTick), nil);
+  { Realize first so we can punch an empty shape before the window maps.
+    Otherwise the first frames are a white sheet over the desktop/panel. }
+  gtk_widget_realize(Overlay);
+  gtk_widget_realize(DrawArea);
+  SilenceBackground(Overlay);
+  SilenceBackground(DrawArea);
+  if gtk_widget_get_window(Overlay) <> nil then
+    HideAllPixels(gtk_widget_get_window(Overlay));
+  if gtk_widget_get_window(DrawArea) <> nil then
+    HideAllPixels(gtk_widget_get_window(DrawArea));
   CollectDesktop;
   Present;
   gtk_widget_show_all(Overlay);
   MakeClickThrough(Overlay);
+  ShapeOverlayWindows;
+  if gtk_widget_get_window(Overlay) <> nil then
+    gdk_window_raise(gtk_widget_get_window(Overlay));
   gtk_main;
   DestroyPix(OverlayPix);
   DestroyPix(BarPix);

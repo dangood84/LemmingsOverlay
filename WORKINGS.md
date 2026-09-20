@@ -120,6 +120,6 @@ Timer → `Tick` → `Update` + dirty flag. Keys through `ApplyChar`. Hosts neve
 
 ### Hosts — present bytes and name the windows
 
-Cocoa copies RGBA into an `NSImage` on a borderless, `ignoresMouseEvents` overlay. Windows uses `UpdateLayeredWindow` with per-pixel alpha (`WS_EX_TRANSPARENT` so clicks fall through). GTK paints a GdkPixbuf and an empty input shape.
+Cocoa copies RGBA into an `NSImage` on a borderless, `ignoresMouseEvents` overlay. Windows uses `UpdateLayeredWindow` with per-pixel alpha (`WS_EX_TRANSPARENT` so clicks fall through). GTK paints a GdkPixbuf, uses an empty input shape for click-through, and a 1-bit window shape so Raspberry Pi (no compositor) does not paint a white desktop.
 
 Window lists: `CGWindowListCopyWindowInfo` (Mac), `EnumWindows` (Windows), `_NET_CLIENT_LIST` (Linux). Own process, layer ≠ 0, and tiny windows are skipped.
