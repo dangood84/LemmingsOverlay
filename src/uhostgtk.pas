@@ -440,6 +440,26 @@ begin
     ShapeToPixbuf(DrawWin, OverlayPix);
 end;
 
+procedure PaintShapedWindow(GdkWin: PGdkWindow);
+var
+  Gc: PGdkGC;
+  W, H: Integer;
+begin
+  { GdkRGB copies the pixbuf's R,G,B into the window visual. The alpha blit
+    on a shaped GTK widget stamps the mask with the theme colour, which on
+    the Pi is white — hence white walkers and white ledge lines. }
+  if (GdkWin = nil) or (OverlayPix = nil) then
+    Exit;
+  W := gdk_pixbuf_get_width(OverlayPix);
+  H := gdk_pixbuf_get_height(OverlayPix);
+  Gc := gdk_gc_new(GdkWin);
+  if Gc = nil then
+    Exit;
+  gdk_draw_rgb_32_image(GdkWin, Gc, 0, 0, W, H, GDK_RGB_DITHER_NONE,
+    gdk_pixbuf_get_pixels(OverlayPix), gdk_pixbuf_get_rowstride(OverlayPix));
+  g_object_unref(Gc);
+end;
+
 procedure SilenceBackground(Win: PGtkWidget);
 var
   GdkWin: PGdkWindow;
@@ -465,9 +485,15 @@ begin
   Controller.ConsumePresent;
   ShapeOverlayWindows;
   if Overlay <> nil then
+  begin
+    PaintShapedWindow(gtk_widget_get_window(Overlay));
     gtk_widget_queue_draw(Overlay);
+  end;
   if DrawArea <> nil then
+  begin
+    PaintShapedWindow(gtk_widget_get_window(DrawArea));
     gtk_widget_queue_draw(DrawArea);
+  end;
   if (StatusIcon <> nil) and (BarPix <> nil) then
   begin
     gtk_status_icon_set_from_pixbuf(StatusIcon, BarPix);
@@ -582,28 +608,12 @@ begin
 end;
 
 function OnExpose(Widget: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
-var
-  DestW, DestH: Integer;
 begin
   Result := True; { do not let GTK paint the default white/grey background }
   if Widget^.window = nil then
     Exit;
   ShapeOverlayWindows;
-  if OverlayPix = nil then
-    Exit;
-  DestW := gdk_pixbuf_get_width(OverlayPix);
-  DestH := gdk_pixbuf_get_height(OverlayPix);
-  { Bilevel: draw opaque RGB only. Full-alpha blit onto a None background
-    leaves shaped pixels unpainted, which on the Pi shows leftover VRAM
-    (old terminals, black silhouettes) as walkers move. }
-  if NeedShapeMask then
-    gdk_pixbuf_render_to_drawable_alpha(OverlayPix, Widget^.window,
-      0, 0, 0, 0, DestW, DestH, GDK_PIXBUF_ALPHA_BILEVEL, ShapeAlpha,
-      GDK_RGB_DITHER_NONE, 0, 0)
-  else
-    gdk_pixbuf_render_to_drawable_alpha(OverlayPix, Widget^.window,
-      0, 0, 0, 0, DestW, DestH, GDK_PIXBUF_ALPHA_FULL, 0,
-      GDK_RGB_DITHER_NONE, 0, 0);
+  PaintShapedWindow(Widget^.window);
 end;
 
 procedure MakeClickThrough(Win: PGtkWidget);
