@@ -88,8 +88,22 @@ var
   SfxRing: array[0..5] of NSSound;
 
 function CGWindowListCopyWindowInfo(option: LongWord; relativeToWindow: LongWord): Pointer; cdecl; external;
-function CGRequestScreenCaptureAccess: Boolean; cdecl; external;
 procedure CFRelease(cf: Pointer); cdecl; external;
+function dlsym(Lib: Pointer; Name: PChar): Pointer; cdecl; external 'libSystem.dylib' name 'dlsym';
+
+type
+  TCGRequestScreenCaptureAccess = function: Boolean; cdecl;
+
+procedure RequestScreenCaptureIfAvailable;
+var
+  P: Pointer;
+begin
+  { Hard-linking CGRequestScreenCaptureAccess aborts on Catalina
+    (Symbol not found). It exists from Big Sur; look it up at runtime. }
+  P := dlsym(Pointer(PtrInt(-2)), 'CGRequestScreenCaptureAccess');
+  if P <> nil then
+    TCGRequestScreenCaptureAccess(P)();
+end;
 
 function NSStr(const S: string): NSString;
 begin
@@ -205,7 +219,7 @@ begin
     askedCapture := True;
     { First call may present the Screen Recording prompt so other apps'
       window bounds are not zeros. }
-    CGRequestScreenCaptureAccess;
+    RequestScreenCaptureIfAvailable;
   end;
 
   Info := CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly or
