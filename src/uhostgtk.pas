@@ -50,6 +50,12 @@ type
     screen: Pointer;
   end;
 
+type
+  PGtkStatusIcon = Pointer;
+
+function gtk_status_icon_new: PGtkStatusIcon; cdecl; external;
+procedure gtk_status_icon_set_from_pixbuf(icon: PGtkStatusIcon; pixbuf: PGdkPixbuf); cdecl; external;
+procedure gtk_status_icon_set_tooltip(icon: PGtkStatusIcon; text: Pgchar); cdecl; external;
 function gtk_widget_get_window(widget: PGtkWidget): PGdkWindow; cdecl; external;
 function gdk_screen_get_rgba_colormap(screen: PGdkScreen): PGdkColormap; cdecl; external;
 procedure gdk_window_input_shape_combine_region(window: PGdkWindow;
@@ -99,6 +105,9 @@ var
   HudBuf: TPixelBuffer;
   HudShown: Boolean;
   HudXid: TXWindow;
+  StatusIcon: PGtkStatusIcon;
+  BarPix: PGdkPixbuf;
+  BarMenu: PGtkWidget;
   Controller: TLemmingsController;
   Overlay: PGtkWidget;
   OverlayPix: PGdkPixbuf;
@@ -951,6 +960,78 @@ begin
   Result := False;
 end;
 
+procedure OnMenu(Widget: PGtkWidget; Data: gpointer); cdecl;
+begin
+  if Controller <> nil then
+    Controller.ApplyChar(Char(PtrUInt(Data)));
+end;
+
+procedure OnAbout(Widget: PGtkWidget; Data: gpointer); cdecl;
+var
+  Dlg: PGtkWidget;
+begin
+  Dlg := gtk_message_dialog_new(nil, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO,
+    GTK_BUTTONS_OK, PChar(LemmingsAboutText));
+  gtk_window_set_title(PGtkWindow(Dlg), PChar(LemmingsAboutTitle));
+  gtk_dialog_run(PGtkDialog(Dlg));
+  gtk_widget_destroy(Dlg);
+end;
+
+function BuildBarMenu: PGtkWidget;
+var
+  Menu, Item: PGtkWidget;
+
+  procedure Add(const Caption: string; Ch: Char);
+  begin
+    Item := gtk_menu_item_new_with_label(PChar(Caption));
+    g_signal_connect(G_OBJECT(Item), 'activate', TGCallback(@OnMenu),
+      Pointer(PtrUInt(Ord(Ch))));
+    gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
+  end;
+
+begin
+  Menu := gtk_menu_new;
+  Add('Pause / Resume', ' ');
+  Add('Mute Sounds', 'M');
+  Add('More Lemmings', ']');
+  Add('Fewer Lemmings', '[');
+  Add('Show Ledges', 'D');
+  Add('Hide HUD', 'H');
+  Item := gtk_separator_menu_item_new;
+  gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
+  Item := gtk_menu_item_new_with_label('About Lemmings Overlay');
+  g_signal_connect(G_OBJECT(Item), 'activate', TGCallback(@OnAbout), nil);
+  gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
+  Item := gtk_separator_menu_item_new;
+  gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
+  Item := gtk_menu_item_new_with_label('Quit Lemmings Overlay');
+  g_signal_connect(G_OBJECT(Item), 'activate', TGCallback(@OnQuit), nil);
+  gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
+  gtk_widget_show_all(Menu);
+  Result := Menu;
+end;
+
+procedure OnStatusPopup(Icon: PGtkStatusIcon; Button: guint; ActivateTime: guint32;
+  Data: gpointer); cdecl;
+begin
+  if BarMenu = nil then
+    BarMenu := BuildBarMenu;
+  gtk_menu_popup(PGtkMenu(BarMenu), nil, nil, nil, nil, Button, ActivateTime);
+end;
+
+procedure InstallBar;
+begin
+  RenderBarIcon(Controller.Bar);
+  BarPix := gdk_pixbuf_new(GDK_COLORSPACE_RGB, True, 8,
+    Controller.Bar.Width, Controller.Bar.Height);
+  PixbufFromBuffer(BarPix, Controller.Bar);
+  StatusIcon := gtk_status_icon_new;
+  gtk_status_icon_set_tooltip(StatusIcon, 'Lemmings Overlay');
+  g_signal_connect(G_OBJECT(StatusIcon), 'popup-menu', TGCallback(@OnStatusPopup), nil);
+  if (StatusIcon <> nil) and (BarPix <> nil) then
+    gtk_status_icon_set_from_pixbuf(StatusIcon, BarPix);
+end;
+
 procedure HostRun;
 var
   Screen: PGdkScreen;
@@ -976,12 +1057,13 @@ begin
   WriteSfxFiles;
 
   Controller := TLemmingsController.Create(W, H, BarW, BarH, LoadConfig);
+  InstallBar;
 
   g_timeout_add(TickMs, TGSourceFunc(@OnTick), nil);
   CollectDesktop;
   PlaceWalkers;
   Writeln('Lemmings are walking the window tops. Each has its own window.');
-  Writeln('Press Ctrl-C to quit.');
+  Writeln('The walker is in the panel. Right-click it, or press Ctrl-C.');
   gtk_main;
   DestroyPix(OverlayPix);
   DestroyPix(HudPix);

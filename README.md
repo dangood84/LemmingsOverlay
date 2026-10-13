@@ -80,7 +80,7 @@ open build/LemmingsOverlay.app
 |----|----------|
 | **macOS** | Full-screen click-through overlay + menu extra. No Dock icon. |
 | **Windows** | Layered click-through overlay covering the primary monitor + notification-area icon. |
-| **Linux** | One small GTK 2 window per walker, so the panel menus stay usable. Quit with Ctrl-C. |
+| **Linux** | One small GTK 2 window per walker, plus a panel icon. Right-click it, or press Ctrl-C. |
 
 Quit from the extra / tray. Closing is not a window close box — there isn't one.
 
