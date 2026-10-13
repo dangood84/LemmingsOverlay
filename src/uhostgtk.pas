@@ -2,11 +2,11 @@ unit uhostgtk;
 
 {$mode objfpc}{$H+}
 
-{ Linux GTK 2 click-through overlay. Same TLemmingsController as macOS.
-  FPC's gtk2 unit often omits a few Gdk symbols (same as Eyes), so those
-  are cdecl externals. Window bounds come from libX11, not the x / xlib
-  Pascal units. The Pi panel has no usable tray slot, so quit with Ctrl+C
-  in the terminal (or killall lemmingsoverlay). }
+{ Linux GTK 2. Same TLemmingsController as macOS.
+  Each walker is its own small window, shaped to the sprite. There is
+  no screen-sized sheet, so panel menus stay reachable. FPC's gtk2 unit
+  omits a few Gdk symbols, so those are cdecl externals. Window bounds
+  come from libX11, not the x / xlib Pascal units. Quit with Ctrl+C. }
 
 interface
 
@@ -82,7 +82,22 @@ const
     outlines are ~0.35 (89), so 48 keeps them without the AA fringe. }
   ShapeAlpha = 48;
 
+type
+  TWalkerView = record
+    Win: PGtkWidget;
+    Pix: PGdkPixbuf;
+    Buf: TPixelBuffer;
+    Shown: Boolean;
+    Xid: TXWindow;
+  end;
+
 var
+  Walkers: array of TWalkerView;
+  HudWin: PGtkWidget;
+  HudPix: PGdkPixbuf;
+  HudBuf: TPixelBuffer;
+  HudShown: Boolean;
+  HudXid: TXWindow;
   Controller: TLemmingsController;
   Overlay: PGtkWidget;
   OverlayPix: PGdkPixbuf;
@@ -194,6 +209,22 @@ begin
   end;
 end;
 
+function IsOurWindow(Id: TXWindow): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  if Id = 0 then
+    Exit;
+  if Id = HudXid then
+    Exit(True);
+  if (OverlayXid <> 0) and (Id = OverlayXid) then
+    Exit(True);
+  for I := 0 to High(Walkers) do
+    if Walkers[I].Xid = Id then
+      Exit(True);
+end;
+
 procedure CollectX11Windows(var Desk: TDeskSnapshot);
 var
   Dpy: TXDisplay;
@@ -227,7 +258,7 @@ begin
   for I := 0 to Integer(NItems) - 1 do
   begin
     Win := Wins[I];
-    if (OverlayXid <> 0) and (Win = OverlayXid) then
+    if IsOurWindow(Win) then
       Continue;
     FillChar(Attr, SizeOf(Attr), 0);
     if XGetWindowAttributes(Dpy, Win, @Attr) = 0 then
@@ -667,6 +698,182 @@ begin
   gdk_window_resize(GdkWin, ScreenWpx, H);
 end;
 
+procedure HideWalker(I: Integer);
+begin
+  if (I < 0) or (I > High(Walkers)) or (Walkers[I].Win = nil) or
+     not Walkers[I].Shown then
+    Exit;
+  gtk_widget_hide(Walkers[I].Win);
+  Walkers[I].Shown := False;
+end;
+
+procedure ShapeSmall(Win: PGtkWidget; Pix: PGdkPixbuf; var Xid: TXWindow);
+var
+  GdkWin: PGdkWindow;
+  Mask, Colour: PGdkPixmap;
+  Gc: PGdkGC;
+  W, H: Integer;
+begin
+  if (Win = nil) or (Pix = nil) then
+    Exit;
+  gtk_widget_realize(Win);
+  GdkWin := gtk_widget_get_window(Win);
+  if GdkWin = nil then
+    GdkWin := Win^.window;
+  if GdkWin = nil then
+    Exit;
+  W := gdk_pixbuf_get_width(Pix);
+  H := gdk_pixbuf_get_height(Pix);
+  if (W < 1) or (H < 1) then
+    Exit;
+  Colour := gdk_pixmap_new(GdkWin, W, H, -1);
+  if Colour <> nil then
+  begin
+    Gc := gdk_gc_new(Colour);
+    if Gc <> nil then
+    begin
+      gdk_draw_rgb_32_image(Colour, Gc, 0, 0, W, H, GDK_RGB_DITHER_NONE,
+        gdk_pixbuf_get_pixels(Pix), gdk_pixbuf_get_rowstride(Pix));
+      g_object_unref(Gc);
+    end;
+    gdk_window_set_back_pixmap(GdkWin, Colour, False);
+    g_object_unref(Colour);
+  end;
+  Mask := gdk_pixmap_new(GdkWin, W, H, 1);
+  if Mask <> nil then
+  begin
+    gdk_pixbuf_render_threshold_alpha(Pix, Mask, 0, 0, 0, 0, W, H, ShapeAlpha);
+    gdk_window_shape_combine_mask(GdkWin, Mask, 0, 0);
+    g_object_unref(Mask);
+  end;
+  gdk_window_clear(GdkWin);
+  PunchInput(GdkWin);
+  if Xid = 0 then
+    Xid := gdk_x11_drawable_get_xid(GdkWin);
+end;
+
+function OnWalkerExpose(Widget: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
+var
+  I: Integer;
+begin
+  I := PtrInt(Data);
+  if (I >= 0) and (I <= High(Walkers)) then
+    ShapeSmall(Walkers[I].Win, Walkers[I].Pix, Walkers[I].Xid);
+  Result := True;
+end;
+
+function OnHudExpose(Widget: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
+begin
+  ShapeSmall(HudWin, HudPix, HudXid);
+  Result := True;
+end;
+
+procedure MakeSmallWindow(var Win: PGtkWidget; const Title: string;
+  Expose: Pointer; Data: Pointer);
+begin
+  if Win <> nil then
+    Exit;
+  Win := gtk_window_new(GTK_WINDOW_TOPLEVEL);
+  gtk_window_set_title(PGtkWindow(Win), PChar(Title));
+  gtk_window_set_decorated(PGtkWindow(Win), False);
+  gtk_window_set_keep_above(PGtkWindow(Win), True);
+  gtk_window_set_skip_taskbar_hint(PGtkWindow(Win), True);
+  gtk_window_set_skip_pager_hint(PGtkWindow(Win), True);
+  gtk_window_set_accept_focus(PGtkWindow(Win), False);
+  gtk_widget_set_app_paintable(Win, True);
+  gtk_widget_set_double_buffered(Win, False);
+  g_signal_connect(G_OBJECT(Win), 'expose-event', TGCallback(Expose), Data);
+end;
+
+procedure Upload(Pix: PGdkPixbuf; Buf: TPixelBuffer);
+begin
+  PixbufFromBuffer(Pix, Buf);
+  HardenPixbufAlpha(Pix, ShapeAlpha);
+end;
+
+procedure PlaceWalkers;
+var
+  I, W, H, X0, Y0: Integer;
+  L, Local: TLemming;
+  S: Single;
+begin
+  if Controller = nil then
+    Exit;
+  S := Controller.Model.Scale;
+  if S < 0.5 then
+    S := 1;
+  for I := 0 to Controller.Model.LemmingCount - 1 do
+  begin
+    L := Controller.Model.Lemming(I);
+    if L.State = lsGone then
+    begin
+      HideWalker(I);
+      Continue;
+    end;
+    if I > High(Walkers) then
+      SetLength(Walkers, I + 1);
+    MakeSmallWindow(Walkers[I].Win, 'Lemmings', @OnWalkerExpose, Pointer(PtrInt(I)));
+    W := Round(36 * S);
+    H := Round(40 * S);
+    if W < 8 then
+      W := 8;
+    if H < 8 then
+      H := 8;
+    X0 := Round(L.X) - W div 2;
+    Y0 := Round(L.Y - 32 * S);
+    if (PanelTopPx > 0) and (Y0 < PanelTopPx) then
+      Y0 := PanelTopPx;
+    if Walkers[I].Buf = nil then
+      Walkers[I].Buf := TPixelBuffer.Create(W, H)
+    else
+      Walkers[I].Buf.Resize(W, H);
+    Local := L;
+    Local.X := L.X - X0;
+    Local.Y := L.Y - Y0;
+    RenderOneLemming(Walkers[I].Buf, Local, S);
+    EnsurePix(Walkers[I].Pix, W, H);
+    if Walkers[I].Pix = nil then
+      Continue;
+    Upload(Walkers[I].Pix, Walkers[I].Buf);
+    gtk_window_resize(PGtkWindow(Walkers[I].Win), W, H);
+    gtk_window_move(PGtkWindow(Walkers[I].Win), X0, Y0);
+    if not Walkers[I].Shown then
+    begin
+      gtk_widget_show(Walkers[I].Win);
+      Walkers[I].Shown := True;
+    end;
+    ShapeSmall(Walkers[I].Win, Walkers[I].Pix, Walkers[I].Xid);
+  end;
+  for I := Controller.Model.LemmingCount to High(Walkers) do
+    HideWalker(I);
+
+  if not Controller.Model.Config.ShowHUD then
+  begin
+    if (HudWin <> nil) and HudShown then
+    begin
+      gtk_widget_hide(HudWin);
+      HudShown := False;
+    end;
+    Exit;
+  end;
+  if HudBuf = nil then
+    HudBuf := TPixelBuffer.Create(8, 8);
+  RenderHud(HudBuf, Controller.Model);
+  MakeSmallWindow(HudWin, 'Lemmings', @OnHudExpose, nil);
+  EnsurePix(HudPix, HudBuf.Width, HudBuf.Height);
+  if (HudWin = nil) or (HudPix = nil) then
+    Exit;
+  Upload(HudPix, HudBuf);
+  gtk_window_resize(PGtkWindow(HudWin), HudBuf.Width, HudBuf.Height);
+  gtk_window_move(PGtkWindow(HudWin), 8, PanelTopPx + 4);
+  if not HudShown then
+  begin
+    gtk_widget_show(HudWin);
+    HudShown := True;
+  end;
+  ShapeSmall(HudWin, HudPix, HudXid);
+end;
+
 function OnTick(Data: gpointer): gboolean; cdecl;
 begin
   if WantQuit then
@@ -678,8 +885,7 @@ begin
   CollectDesktop;
   Controller.Tick;
   DrainAudio;
-  if Controller.NeedsPresent then
-    Present;
+  PlaceWalkers;
   Result := True;
 end;
 
@@ -747,7 +953,6 @@ end;
 procedure HostRun;
 var
   Screen: PGdkScreen;
-  Colormap: PGdkColormap;
   W, H: Integer;
 begin
   gtk_init(@argc, @argv);
@@ -765,55 +970,20 @@ begin
   H := gdk_screen_get_height(Screen);
   ScreenWpx := W;
   ScreenHpx := H;
-  NeedShapeMask := not CompositorIsRunning;
+  NeedShapeMask := True;
   PanelTopPx := ReadPanelTop;
   WriteSfxFiles;
 
   Controller := TLemmingsController.Create(W, H, BarW, BarH, LoadConfig);
 
-  Overlay := gtk_window_new(GTK_WINDOW_TOPLEVEL);
-  gtk_window_set_title(PGtkWindow(Overlay), 'Lemmings Overlay');
-  gtk_window_set_decorated(PGtkWindow(Overlay), False);
-  gtk_window_set_keep_above(PGtkWindow(Overlay), True);
-  gtk_window_set_skip_taskbar_hint(PGtkWindow(Overlay), True);
-  gtk_window_set_skip_pager_hint(PGtkWindow(Overlay), True);
-  gtk_window_set_accept_focus(PGtkWindow(Overlay), False);
-  gtk_widget_set_app_paintable(Overlay, True);
-  gtk_widget_set_double_buffered(Overlay, False);
-  { Only use ARGB if a compositor is actually compositing. On the Pi the
-    rgba colormap exists but is painted as an opaque white screen. }
-  if not NeedShapeMask then
-  begin
-    Colormap := gdk_screen_get_rgba_colormap(Screen);
-    if Colormap <> nil then
-      gtk_widget_set_colormap(Overlay, Colormap);
-  end;
-  gtk_window_move(PGtkWindow(Overlay), 0, PanelTopPx);
-  gtk_window_resize(PGtkWindow(Overlay), W, H - PanelTopPx);
-  g_signal_connect(G_OBJECT(Overlay), 'delete-event', TGCallback(@OnQuit), nil);
-  g_signal_connect(G_OBJECT(Overlay), 'map-event', TGCallback(@OnMap), nil);
-  g_signal_connect(G_OBJECT(Overlay), 'realize', TGCallback(@OnRealize), nil);
-  g_signal_connect(G_OBJECT(Overlay), 'expose-event', TGCallback(@OnExpose), nil);
-
   g_timeout_add(TickMs, TGSourceFunc(@OnTick), nil);
-  { Realize first so we can punch an empty shape before the window maps.
-    Otherwise the first frames are a white sheet over the desktop/panel. }
-  gtk_widget_realize(Overlay);
-  PlaceOverlay;
-  if not NeedShapeMask then
-    SilenceBackground(Overlay);
-  if gtk_widget_get_window(Overlay) <> nil then
-    HideAllPixels(gtk_widget_get_window(Overlay));
   CollectDesktop;
-  Present;
-  gtk_widget_show_all(Overlay);
-  MakeOverlayClickThrough;
-  if NeedShapeMask then
-    PresentShaped
-  else
-    ShapeOverlayWindows;
+  PlaceWalkers;
+  Writeln('Lemmings are walking the window tops. Each has its own window.');
+  Writeln('Press Ctrl-C to quit.');
   gtk_main;
   DestroyPix(OverlayPix);
+  DestroyPix(HudPix);
   DestroyColorPixmap;
   Controller.Free;
 end;

@@ -26,6 +26,8 @@ type
   end;
 
 procedure RenderLemmings(Buf: TPixelBuffer; Model: TLemmingModel);
+procedure RenderOneLemming(Buf: TPixelBuffer; const L: TLemming; Scale: Single);
+procedure RenderHud(Buf: TPixelBuffer; Model: TLemmingModel);
 procedure RenderBarIcon(Buf: TPixelBuffer);
 procedure CopyBGRA(Buf: TPixelBuffer; Dest: PByte);
 
@@ -432,6 +434,43 @@ begin
       C(8, 12, 24), 0.45);
     DrawText(Buf.Ptr, Buf.Width, Buf.Height, 11, 10, Hud, 220, 230, 210, Fs);
   end;
+end;
+
+procedure RenderOneLemming(Buf: TPixelBuffer; const L: TLemming; Scale: Single);
+begin
+  Buf.Clear(0, 0, 0, 0);
+  DrawLemming(Buf, L, Scale);
+end;
+
+procedure RenderHud(Buf: TPixelBuffer; Model: TLemmingModel);
+var
+  Fs, W, H: Integer;
+  Hud, MuteStr: string;
+begin
+  if (Model = nil) or not Model.Config.ShowHUD then
+  begin
+    Buf.Resize(1, 1);
+    Buf.Clear(0, 0, 0, 0);
+    Exit;
+  end;
+  Fs := Max(1, Round(Model.Scale));
+  if Model.Config.Muted then
+    MuteStr := 'mute'
+  else
+    MuteStr := 'sfx';
+  Hud := Format('Lemmings %d  %s', [Model.AliveCount, MuteStr]);
+  if Model.Paused then
+    Hud := Hud + '  paused';
+  W := TextWidth(Hud, Fs) + 16;
+  H := TextHeight(Fs) + 14;
+  if W < 8 then
+    W := 8;
+  if H < 8 then
+    H := 8;
+  Buf.Resize(W, H);
+  Buf.Clear(0, 0, 0, 0);
+  FillRect(Buf, 0, 0, W, H, C(8, 12, 24), 0.85);
+  DrawText(Buf.Ptr, Buf.Width, Buf.Height, 8, 6, Hud, 220, 230, 210, Fs);
 end;
 
 procedure RenderBarIcon(Buf: TPixelBuffer);

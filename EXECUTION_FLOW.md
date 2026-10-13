@@ -124,7 +124,7 @@ The array slot is reused; nothing is allocated per walker.
 3. Each living walker (original geometry, not a sprite sheet)
 4. Optional HUD (`Lemmings 3  sfx`)
 
-Cocoa copies the RGBA bytes into an `NSImage` and invalidates the view. Windows uses `CopyBGRA` + `UpdateLayeredWindow`. GTK copies into a `GdkPixbuf`.
+Cocoa copies the RGBA bytes into an `NSImage` and invalidates the view. Windows uses `CopyBGRA` + `UpdateLayeredWindow`. On Linux each walker is copied into its own small `GdkPixbuf` and shown in its own window, so there is no sheet the size of the screen.
 
 ---
 

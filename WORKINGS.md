@@ -13,7 +13,7 @@ Work from the project root. `fpc` must be on `PATH`. Output always lands in `bui
 | What you want | Command | What you get |
 |---------------|---------|--------------|
 | macOS app | `make` then `make run` | `build/LemmingsOverlay.app`, opened; extra in the menu bar |
-| Linux / Raspberry Pi OS | `sudo apt install fpc libgtk2.0-dev` then `make linux` then `./build/lemmingsoverlay` | GTK 2 overlay + panel icon |
+| Linux / Raspberry Pi OS | `sudo apt install fpc libgtk2.0-dev` then `make linux` then `./build/lemmingsoverlay` | one small GTK 2 window per walker |
 | Windows 10+ | from a native FPC prompt: `make windows` then `build\LemmingsOverlay.exe` | layered overlay + tray icon |
 | Headless checks | `make test` | prints `ok` lines; non-zero if walk / slide / splat / sfx are wrong |
 | Frozen canvas frames | `make snap` | `build/snap-catalogue.ppm`, `snap-sprites.ppm`, `snap-hud.ppm`, `snap-wide.ppm` |
