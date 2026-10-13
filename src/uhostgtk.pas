@@ -18,7 +18,8 @@ implementation
 
 uses
   SysUtils, Unix, BaseUnix, ctypes, gtk2, gdk2, gdk2pixbuf, gdk2x, glib2,
-  ulemmingconfig, ulemmingdesktop, ulemmingapp, ulemmingaudio, ulemmingrender;
+  ulemmingconfig, ulemmingdesktop, ulemmingmodel, ulemmingapp, ulemmingaudio,
+  ulemmingrender;
 
 type
   TXDisplay = Pointer;
