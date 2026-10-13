@@ -58,6 +58,9 @@ const
   UlwAlpha = 2;
   AcSrcOver = 0;
   AcSrcAlpha = 1;
+  WaveSlots = 4;
+  { Must match ulemmingaudio.Rate. }
+  WaveRate = 22050;
 
 function UpdateLayeredWindow(Wnd: HWND; hdcDst: HDC; pptDst: PPoint;
   psize: Pointer; hdcSrc: HDC; pptSrc: PPoint; crKey: COLORREF;
@@ -73,8 +76,8 @@ var
   Bgra: array of Byte;
   SfxWav: array[sfxTrudge..sfxYippee] of TBytes;
   LastTrudge: QWord;
-  SfxHold: array[0..5] of TBytes;
-  SfxSlot: Integer;
+  WaveOut: HWAVEOUT;
+  WaveHdr: array[0..WaveSlots - 1] of TWaveHdr;
 
 function EnumAddWindow(Wnd: HWND; LParam: LPARAM): BOOL; stdcall;
 var
@@ -138,15 +141,97 @@ begin
   Controller.SetDesktop(Desk);
 end;
 
-procedure PlaySfx(Kind: TSfxKind);
+procedure CloseWaveOut;
+var
+  I: Integer;
 begin
+  if WaveOut = 0 then
+    Exit;
+  waveOutReset(WaveOut);
+  for I := 0 to High(WaveHdr) do
+    if (WaveHdr[I].dwFlags and WHDR_PREPARED) <> 0 then
+      waveOutUnprepareHeader(WaveOut, @WaveHdr[I], SizeOf(TWaveHdr));
+  waveOutClose(WaveOut);
+  WaveOut := 0;
+  FillChar(WaveHdr, SizeOf(WaveHdr), 0);
+end;
+
+function OpenWaveOut: Boolean;
+var
+  Fmt: TWaveFormatEx;
+begin
+  Result := WaveOut <> 0;
+  if Result then
+    Exit;
+  FillChar(Fmt, SizeOf(Fmt), 0);
+  Fmt.wFormatTag := WAVE_FORMAT_PCM;
+  Fmt.nChannels := 1;
+  Fmt.nSamplesPerSec := WaveRate;
+  Fmt.wBitsPerSample := 16;
+  Fmt.nBlockAlign := 2;
+  Fmt.nAvgBytesPerSec := WaveRate * 2;
+  Fmt.cbSize := 0;
+  Result := waveOutOpen(@WaveOut, WAVE_MAPPER, @Fmt, 0, 0, CALLBACK_NULL) = MMSYSERR_NOERROR;
+  if not Result then
+    WaveOut := 0;
+end;
+
+procedure ReleaseDoneHdrs;
+var
+  I: Integer;
+begin
+  if WaveOut = 0 then
+    Exit;
+  for I := 0 to High(WaveHdr) do
+    if ((WaveHdr[I].dwFlags and WHDR_PREPARED) <> 0) and
+       ((WaveHdr[I].dwFlags and WHDR_INQUEUE) = 0) then
+    begin
+      waveOutUnprepareHeader(WaveOut, @WaveHdr[I], SizeOf(TWaveHdr));
+      FillChar(WaveHdr[I], SizeOf(WaveHdr[I]), 0);
+    end;
+end;
+
+function FreeWaveSlot: Integer;
+var
+  I: Integer;
+begin
+  Result := -1;
+  for I := 0 to High(WaveHdr) do
+    if (WaveHdr[I].dwFlags and WHDR_PREPARED) = 0 then
+    begin
+      Result := I;
+      Exit;
+    end;
+end;
+
+procedure PlaySfx(Kind: TSfxKind);
+var
+  Slot: Integer;
+  PcmLen: DWORD;
+begin
+  { PlaySound(SND_ASYNC) reopens the device on every clomp. Boot Camp's
+    Cirrus stack turns that into squeaks; keep one waveOut and queue PCM. }
   if (Kind < sfxTrudge) or (Kind > sfxYippee) then
     Exit;
-  if Length(SfxWav[Kind]) < 44 then
+  if Length(SfxWav[Kind]) <= 44 then
     Exit;
-  SfxHold[SfxSlot] := SfxWav[Kind];
-  PlaySound(PChar(@SfxHold[SfxSlot][0]), 0, SND_MEMORY or SND_ASYNC or SND_NODEFAULT);
-  SfxSlot := (SfxSlot + 1) mod Length(SfxHold);
+  if not OpenWaveOut then
+    Exit;
+  ReleaseDoneHdrs;
+  Slot := FreeWaveSlot;
+  if Slot < 0 then
+    Exit;
+  PcmLen := Length(SfxWav[Kind]) - 44;
+  FillChar(WaveHdr[Slot], SizeOf(TWaveHdr), 0);
+  WaveHdr[Slot].lpData := PAnsiChar(@SfxWav[Kind][44]);
+  WaveHdr[Slot].dwBufferLength := PcmLen;
+  if waveOutPrepareHeader(WaveOut, @WaveHdr[Slot], SizeOf(TWaveHdr)) <> MMSYSERR_NOERROR then
+    Exit;
+  if waveOutWrite(WaveOut, @WaveHdr[Slot], SizeOf(TWaveHdr)) <> MMSYSERR_NOERROR then
+  begin
+    waveOutUnprepareHeader(WaveOut, @WaveHdr[Slot], SizeOf(TWaveHdr));
+    FillChar(WaveHdr[Slot], SizeOf(TWaveHdr), 0);
+  end;
 end;
 
 procedure DrainAudio;
@@ -167,7 +252,7 @@ begin
   begin
     if Kind = sfxTrudge then
     begin
-      if NowMs - LastTrudge < 100 then
+      if NowMs - LastTrudge < 180 then
         Continue;
       LastTrudge := NowMs;
     end;
@@ -357,7 +442,7 @@ begin
       begin
         KillTimer(Wnd, TickId);
         ShellNotifyIcon(NIM_DELETE, @TrayIcon);
-        PlaySound(nil, 0, 0);
+        CloseWaveOut;
         PostQuitMessage(0);
       end;
     else
@@ -373,7 +458,8 @@ var
   Ex: DWORD;
 begin
   LastTrudge := 0;
-  SfxSlot := 0;
+  WaveOut := 0;
+  FillChar(WaveHdr, SizeOf(WaveHdr), 0);
   for Kind := sfxTrudge to sfxYippee do
     SfxWav[Kind] := BuildSfxWav(Kind);
 
